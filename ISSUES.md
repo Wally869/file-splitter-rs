@@ -6,7 +6,6 @@
 2. **Attributes on an inherent impl are dropped.** `#[cfg(...)] impl Foo { ... }`: the moved methods and the partial impl in the root get a bare `impl Foo` header.
 3. **Inline module visibility is dropped.** `pub mod inner { ... }` becomes `mod inner;` in the root.
 4. **`super::` inside string literals and comments is rewritten.** The `super::` fix of moved code is a regex over the text, so it also changes literal content.
-5. **The cooking-frenzy re-check was not run in round 2.** It needs a scratch `git worktree` in another repository, which the round 2 agent was not allowed to run.
 
 ## Fixed in round 2 (commits 925b7a1 and e65448a, 2026-11-02)
 
@@ -14,6 +13,7 @@
 - No item is dropped: `extern crate`, `union`, `extern {}` blocks, `macro_rules!` and associated consts and types of inherent impls stay in the root, at any position (925b7a1).
 - One dedent rule for free functions, methods and items of inline modules; rows that start inside a literal keep their text (925b7a1).
 - Tests compare the items of input and output on the compile fixture and on `tests/fixtures/mixed.rs` (925b7a1).
+- The cooking-frenzy `reach/mod.rs` split still compiles after round 2: 4 parts, `cargo check -p dsl` clean (run by the CTO after the merge).
 - `src/split/parse.rs` (569 lines) is split by the tool itself into `parse/{mod,fn_source,inline_module,impls}.rs`: 182, 111, 144 and 92 lines (e65448a).
 
 ## Fixed in round 1 (merge of 76ed3bb, 2026-11-02)
