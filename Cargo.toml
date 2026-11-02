@@ -11,3 +11,6 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 walkdir = "2"
 anyhow = "1"
 regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

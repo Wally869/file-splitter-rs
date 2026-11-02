@@ -43,7 +43,8 @@ pub struct VisFix {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ImplContext {
-    /// The impl header, e.g. `impl<T: Clone> MyStruct<T>`
+    /// The source text from the impl's first outer attribute up to its `{`, with the
+    /// whitespace before the `{`.
     pub header: String,
     /// The self type as a string for display
     pub self_type: String,
