@@ -1,8 +1,10 @@
 # Issues
 
-## Open (round 5, 2026-11-02)
+## Open (found in round 5, 2026-11-02)
 
-None.
+1. **Tests share one scratch folder.** The integration tests copy fixtures to `~/.cargo/build/tmp/<case>`, a path shared by every worktree; two test runs at the same time can overwrite each other's files.
+2. **`tests/split_cli.rs` is about 545 lines**, above the project's 500-line limit.
+3. Low: the doc comment of `ImplContext.header` (`src/split/parse/mod.rs`) is out of date; the header now holds the outer attributes and the whitespace before `{`. Not a defect; not scheduled.
 
 ## Fixed in round 5 (commit 3512f7a, 2026-11-02)
 
