@@ -2,6 +2,8 @@
 
 Split a long Rust file into a module of smaller files.
 
+Coding agents handle long files badly: they lose track of the content and fall back on fragile `sed` edits. Asking a strong model to do the split itself wastes tokens on mechanical work. This tool does that work in one command, and the output compiles. What is left is to give the parts good names, and a cheap agent such as Haiku can do that.
+
 ## Usage
 
 ```sh
@@ -60,7 +62,3 @@ The output compiles without edits.
 ## How functions are grouped
 
 Function names are cut at each `_` and compared with BM25, then clustered: `parse_header`, `parse_body` and `parse_query` end up together. Small clusters merge until the number of parts is the moved lines divided by the budget, rounded up.
-
-## Why
-
-Coding agents handle long files badly: they lose track of the content and fall back on fragile `sed` edits. This tool does the mechanical work of a split, so the agent only picks names for the parts.
