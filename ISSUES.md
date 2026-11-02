@@ -1,8 +1,12 @@
 # Issues
 
-## Open (found in round 4, 2026-11-02)
+## Open (round 5, 2026-11-02)
 
-1. **Comments inside an inherent impl's header are dropped.** The header is rebuilt from tokens, so a comment inside it (`impl<T> /* note */ Foo<T>`, or in a `where` clause) is not copied. The `default` keyword of a `default impl` is dropped the same way.
+None.
+
+## Fixed in round 5 (commit 3512f7a, 2026-11-02)
+
+- The header of an inherent impl is copied from the source text as written, from its first outer attribute to its `{`: generics, `where` clause (also over several lines), `unsafe`, `default`, the comments in it and the whitespace before the `{` are the same on every block emitted for it.
 
 ## Fixed in round 4 (commit 1fee84f, 2026-11-02)
 
