@@ -1,4 +1,8 @@
-use syn::{Item, ImplItem};
+use std::ops::Range;
+
+use anyhow::{Context, Result};
+use proc_macro2::LineColumn;
+use syn::{ImplItem, Item, Visibility};
 
 /// A single splittable item (function or method) with its source text.
 #[derive(Debug, Clone)]
@@ -11,6 +15,19 @@ pub struct SplittableItem {
     pub line_count: usize,
     /// If this is a method, the impl block context needed to wrap it
     pub impl_context: Option<ImplContext>,
+    /// Declared `pub` (not restricted)
+    pub public: bool,
+    /// The visibility as written in the source module, empty when private
+    pub root_vis: String,
+    /// The edit that keeps a private item reachable once it moves into a part
+    pub vis_fix: Option<VisFix>,
+}
+
+/// Replaces `range` of `source_text` with `replacement` when the item is emitted in a part.
+#[derive(Debug, Clone)]
+pub struct VisFix {
+    pub range: Range<usize>,
+    pub replacement: &'static str,
 }
 
 /// Context needed to reconstruct an impl block around extracted methods.
@@ -46,47 +63,50 @@ pub struct InlineModule {
 
 /// Result of classifying a file's items.
 pub struct ClassifiedFile {
+    /// Source lines before the first item: inner attributes, module docs, comments
+    pub preamble: String,
     /// Items that stay in mod.rs (structs, enums, traits, consts, use, etc.)
     pub mod_items: Vec<ModItem>,
     /// Items that get split into subfiles (functions, methods)
     pub splittable_items: Vec<SplittableItem>,
-    /// Use statements from the original file (copied to every subfile)
-    pub use_statements: Vec<String>,
     /// Inline modules with splittable content (e.g. test modules)
     pub inline_modules: Vec<InlineModule>,
 }
 
 /// Given a parsed file and its source, classify every top-level item.
-pub fn classify_items(file: &syn::File, source: &str) -> ClassifiedFile {
+pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> {
     let lines: Vec<&str> = source.lines().collect();
     let mut mod_items = Vec::new();
     let mut splittable_items = Vec::new();
-    let mut use_statements = Vec::new();
     let mut inline_modules = Vec::new();
+
+    let first_item_line = file
+        .items
+        .iter()
+        .map(|item| item_span(item).0)
+        .filter(|&line| line > 0)
+        .min()
+        .unwrap_or(lines.len() + 1);
+    let preamble = lines[..first_item_line - 1].join("\n");
 
     for item in &file.items {
         match item {
             Item::Fn(item_fn) => {
                 let text = extract_item_source(&lines, item);
-                let line_count = text.lines().count();
-                splittable_items.push(SplittableItem {
-                    name: item_fn.sig.ident.to_string(),
-                    source_text: text,
-                    line_count,
-                    impl_context: None,
-                });
+                let first_line = item_span(item).0;
+                let parts = FnParts {
+                    vis: &item_fn.vis,
+                    defaultness: None,
+                    sig: &item_fn.sig,
+                };
+                splittable_items.push(moved_fn(text, first_line, 0, parts, None, false)?);
             }
             Item::Impl(item_impl) => {
-                classify_impl(item_impl, &lines, &mut splittable_items, &mut mod_items);
-            }
-            Item::Use(_) => {
-                let text = extract_item_source(&lines, item);
-                use_statements.push(text.clone());
-                mod_items.push(ModItem { source_text: text });
+                classify_impl(item_impl, &lines, &mut splittable_items, &mut mod_items)?;
             }
             Item::Mod(item_mod) => {
                 // Check if this is an inline module with splittable content
-                if let Some(inline) = try_classify_inline_module(item_mod, &lines) {
+                if let Some(inline) = try_classify_inline_module(item_mod, &lines)? {
                     inline_modules.push(inline);
                 } else {
                     let text = extract_item_source(&lines, item);
@@ -101,12 +121,110 @@ pub fn classify_items(file: &syn::File, source: &str) -> ClassifiedFile {
         }
     }
 
-    ClassifiedFile {
+    Ok(ClassifiedFile {
+        preamble,
         mod_items,
         splittable_items,
-        use_statements,
         inline_modules,
+    })
+}
+
+/// The parts of a fn declaration that decide its visibility edit.
+struct FnParts<'a> {
+    vis: &'a Visibility,
+    defaultness: Option<&'a syn::token::Default>,
+    sig: &'a syn::Signature,
+}
+
+/// Build a splittable item from its source `text`, whose first line is source line
+/// `first_line` and whose lines lost `indent` leading columns to a dedent.
+fn moved_fn(
+    text: String,
+    first_line: usize,
+    indent: usize,
+    parts: FnParts,
+    impl_context: Option<ImplContext>,
+    trait_impl: bool,
+) -> Result<SplittableItem> {
+    // A trait impl method takes no visibility.
+    let vis_fix = if trait_impl {
+        None
+    } else {
+        visibility_fix(&text, first_line, indent, &parts)?
+    };
+    let root_vis = match parts.vis {
+        Visibility::Inherited => String::new(),
+        Visibility::Restricted(r) if r.path.is_ident("self") => String::new(),
+        vis => quote::quote!(#vis).to_string(),
+    };
+    Ok(SplittableItem {
+        name: parts.sig.ident.to_string(),
+        line_count: text.lines().count(),
+        source_text: text,
+        impl_context,
+        public: matches!(parts.vis, Visibility::Public(_)),
+        root_vis,
+        vis_fix,
+    })
+}
+
+/// A private item in a part must be `pub(super)` to stay reachable from the root and the
+/// other parts, which is the same reach it had as a private item of the root.
+fn visibility_fix(
+    text: &str,
+    first_line: usize,
+    indent: usize,
+    parts: &FnParts,
+) -> Result<Option<VisFix>> {
+    let sig = parts.sig;
+    let (start, end, replacement) = match parts.vis {
+        Visibility::Inherited => {
+            let at = parts
+                .defaultness
+                .map(|t| t.span)
+                .or(sig.constness.map(|t| t.span))
+                .or(sig.asyncness.map(|t| t.span))
+                .or(sig.unsafety.map(|t| t.span))
+                .or(sig.abi.as_ref().map(|abi| abi.extern_token.span))
+                .unwrap_or(sig.fn_token.span)
+                .start();
+            (at, at, "pub(super) ")
+        }
+        Visibility::Restricted(r) if r.path.is_ident("self") => (
+            r.pub_token.span.start(),
+            r.paren_token.span.close().end(),
+            "pub(super)",
+        ),
+        _ => return Ok(None),
+    };
+    let range =
+        byte_offset(text, first_line, indent, start)?..byte_offset(text, first_line, indent, end)?;
+    Ok(Some(VisFix { range, replacement }))
+}
+
+fn byte_offset(text: &str, first_line: usize, indent: usize, at: LineColumn) -> Result<usize> {
+    let row = at
+        .line
+        .checked_sub(first_line)
+        .with_context(|| format!("line {} is before the item start {first_line}", at.line))?;
+    let column = at
+        .column
+        .checked_sub(indent)
+        .with_context(|| format!("column {} is inside the removed indent", at.column))?;
+    let mut offset = 0;
+    for (index, line) in text.split('\n').enumerate() {
+        if index == row {
+            let in_line = line
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(line.len()))
+                .nth(column)
+                .with_context(|| format!("column {column} is past the end of line {}", at.line))?;
+            return Ok(offset + in_line);
+        }
+        offset += line.len() + 1;
     }
+    anyhow::bail!("line {} is past the end of the item", at.line)
 }
 
 /// Classify an impl block: extract methods as splittable, keep non-method items in mod.
@@ -115,10 +233,11 @@ fn classify_impl(
     lines: &[&str],
     splittable_items: &mut Vec<SplittableItem>,
     mod_items: &mut Vec<ModItem>,
-) {
+) -> Result<()> {
     let self_ty = &item_impl.self_ty;
     let self_type = quote::quote!(#self_ty).to_string();
     let header = build_impl_header(item_impl);
+    let trait_impl = item_impl.trait_.is_some();
 
     let mut has_non_methods = false;
     let mut methods = Vec::new();
@@ -127,16 +246,24 @@ fn classify_impl(
         match impl_item {
             ImplItem::Fn(method) => {
                 let text = extract_impl_item_source(lines, impl_item);
-                let line_count = text.lines().count();
-                methods.push(SplittableItem {
-                    name: method.sig.ident.to_string(),
-                    source_text: text,
-                    line_count,
-                    impl_context: Some(ImplContext {
-                        header: header.clone(),
-                        self_type: self_type.clone(),
-                    }),
-                });
+                let first_line = attr_start_line(&method.attrs, method.sig.fn_token.span);
+                let parts = FnParts {
+                    vis: &method.vis,
+                    defaultness: method.defaultness.as_ref(),
+                    sig: &method.sig,
+                };
+                let context = ImplContext {
+                    header: header.clone(),
+                    self_type: self_type.clone(),
+                };
+                methods.push(moved_fn(
+                    text,
+                    first_line,
+                    0,
+                    parts,
+                    Some(context),
+                    trait_impl,
+                )?);
             }
             _ => {
                 has_non_methods = true;
@@ -152,6 +279,7 @@ fn classify_impl(
     }
 
     splittable_items.extend(methods);
+    Ok(())
 }
 
 /// Try to classify an inline module (e.g. `#[cfg(test)] mod tests { ... }`).
@@ -160,17 +288,18 @@ fn classify_impl(
 fn try_classify_inline_module(
     item_mod: &syn::ItemMod,
     lines: &[&str],
-) -> Option<InlineModule> {
+) -> Result<Option<InlineModule>> {
     // Only handle inline modules (with content), not external `mod foo;`
-    let (_brace, items) = item_mod.content.as_ref()?;
+    let Some((_brace, items)) = item_mod.content.as_ref() else {
+        return Ok(None);
+    };
 
     // Check if there are any functions inside
-    let has_functions = items.iter().any(|item| matches!(
-        item,
-        Item::Fn(_) | Item::Impl(_)
-    ));
+    let has_functions = items
+        .iter()
+        .any(|item| matches!(item, Item::Fn(_) | Item::Impl(_)));
     if !has_functions {
-        return None;
+        return Ok(None);
     }
 
     let name = item_mod.ident.to_string();
@@ -198,17 +327,19 @@ fn try_classify_inline_module(
     for item in items {
         match item {
             Item::Fn(item_fn) => {
-                let text = dedent(&extract_item_source(lines, item));
-                let line_count = text.lines().count();
-                mod_splittable.push(SplittableItem {
-                    name: item_fn.sig.ident.to_string(),
-                    source_text: text,
-                    line_count,
-                    impl_context: None,
-                });
+                let raw = extract_item_source(lines, item);
+                let indent = common_indent(&raw);
+                let text = dedent(&raw);
+                let parts = FnParts {
+                    vis: &item_fn.vis,
+                    defaultness: None,
+                    sig: &item_fn.sig,
+                };
+                let first_line = item_span(item).0;
+                mod_splittable.push(moved_fn(text, first_line, indent, parts, None, false)?);
             }
             Item::Impl(item_impl) => {
-                classify_impl(item_impl, lines, &mut mod_splittable, &mut mod_items);
+                classify_impl(item_impl, lines, &mut mod_splittable, &mut mod_items)?;
             }
             Item::Use(_) => {
                 let text = dedent(&extract_item_source(lines, item));
@@ -223,13 +354,13 @@ fn try_classify_inline_module(
         }
     }
 
-    Some(InlineModule {
+    Ok(Some(InlineModule {
         name,
         attrs_source,
         use_statements: mod_use_statements,
         splittable_items: mod_splittable,
         mod_items,
-    })
+    }))
 }
 
 /// Extract the source text for a top-level item, including leading attributes/docs.
@@ -295,11 +426,14 @@ fn item_span(item: &Item) -> (usize, usize) {
             }),
         ),
         Item::Macro(m) => {
-            let kw_span = m.mac.path.segments.first().map_or_else(
-                || m.mac.bang_token.span,
-                |seg| seg.ident.span(),
-            );
-            let end = m.semi_token
+            let kw_span = m
+                .mac
+                .path
+                .segments
+                .first()
+                .map_or_else(|| m.mac.bang_token.span, |seg| seg.ident.span());
+            let end = m
+                .semi_token
                 .map(|t| t.span.end().line)
                 .unwrap_or_else(|| m.mac.delimiter.span().close().end().line);
             (attr_start_line(&m.attrs, kw_span), end)
@@ -332,15 +466,18 @@ impl SpanCloseLine for syn::Fields {
     }
 }
 
-/// Strip common leading whitespace from a block of text.
-fn dedent(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let min_indent = lines
-        .iter()
+fn common_indent(text: &str) -> usize {
+    text.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.len() - l.trim_start().len())
         .min()
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+/// Strip common leading whitespace from a block of text.
+fn dedent(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let min_indent = common_indent(text);
 
     if min_indent == 0 {
         return text.to_string();
@@ -380,10 +517,7 @@ fn extract_impl_item_source(lines: &[&str], impl_item: &ImplItem) -> String {
 
 /// Build the impl header string (e.g., `impl<T: Clone> Foo<T>` or `impl Trait for Foo`).
 fn build_impl_header(item_impl: &syn::ItemImpl) -> String {
-    let unsafety = item_impl
-        .unsafety
-        .map(|_| "unsafe ")
-        .unwrap_or("");
+    let unsafety = item_impl.unsafety.map(|_| "unsafe ").unwrap_or("");
 
     let generics = if item_impl.generics.params.is_empty() {
         String::new()
