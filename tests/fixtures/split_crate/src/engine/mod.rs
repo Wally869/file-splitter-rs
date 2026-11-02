@@ -35,6 +35,48 @@ impl Engine { // comment: after impl Engine brace
     }
 }
 
+pub struct Wrapper<T> {
+    inner: T,
+}
+
+impl<T> /* x */ Wrapper<T> where T: Clone // y
+{
+    pub fn wrap_first(&self) -> T {
+        let first = self.inner.clone();
+        let second = first.clone();
+        let third = second.clone();
+        third
+    }
+
+    pub fn wrap_second(&self) -> (T, T) {
+        let left = self.wrap_first();
+        let right = self.inner.clone();
+        let pair = (left, right);
+        pair
+    }
+}
+
+impl<T> Wrapper<T>
+where
+    // comment: in where clause
+    T: Clone
+        + Default,
+{
+    pub fn zeta_reset(&mut self) -> T {
+        let old = self.inner.clone();
+        let fresh = T::default();
+        self.inner = fresh;
+        old
+    }
+
+    pub fn zeta_swap(&mut self, value: T) -> T {
+        let old = self.zeta_reset();
+        let kept = old.clone();
+        self.inner = value;
+        kept
+    }
+}
+
 pub trait Shape {
     type Output;
     const SIDES: u32;

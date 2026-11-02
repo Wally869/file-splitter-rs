@@ -328,7 +328,7 @@ fn render_part(cluster: &Cluster) -> Result<String> {
     }
 
     for (ctx, methods) in impl_groups {
-        lines.push(format!("{} {{", ctx.header));
+        lines.push(format!("{}{{", ctx.header));
         if let Some(top) = &ctx.body_top {
             lines.push(indent_rows(top, &[]));
             lines.push(String::new());

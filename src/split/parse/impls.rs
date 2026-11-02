@@ -36,11 +36,7 @@ pub(super) fn classify_impl(
         Some(from) => comment_rows(lines, from, impl_start - 1)?,
         None => None,
     };
-    let header = format!(
-        "{}{}",
-        outer_attrs(lines, item_impl)?,
-        build_impl_header(item_impl)
-    );
+    let header = impl_header(lines, item_impl)?;
 
     // Inner attributes stay out of the first member's leading comments.
     let mut prev_end = inner_attrs_end(
@@ -87,7 +83,7 @@ pub(super) fn classify_impl(
     if let (false, Some(top)) = (kept.is_empty(), &body_top) {
         kept.insert(0, indent_rows(top, &[]));
     }
-    let partial = (!kept.is_empty()).then(|| format!("{header} {{\n{}\n}}", kept.join("\n\n")));
+    let partial = (!kept.is_empty()).then(|| format!("{header}{{\n{}\n}}", kept.join("\n\n")));
     let root_text = match (leading, partial) {
         (Some(comments), Some(partial)) => Some(format!("{comments}\n{partial}")),
         (comments, partial) => comments.or(partial),
@@ -98,23 +94,20 @@ pub(super) fn classify_impl(
     Ok(())
 }
 
-/// The outer attributes of an impl as written, with the comments between them and before the
-/// `impl` keyword, less the impl's indent, ending in a newline; empty when it has none.
-fn outer_attrs(lines: &[&str], item_impl: &syn::ItemImpl) -> Result<String> {
-    let Some(first) = item_impl
+/// The header of an impl as written, from its first outer attribute (or its first keyword)
+/// up to its `{`, with the comments in it and the whitespace before the `{`, less the impl's
+/// indent. Followed by `{`, it opens the impl as in the source.
+fn impl_header(lines: &[&str], item_impl: &syn::ItemImpl) -> Result<String> {
+    let start = item_impl
         .attrs
         .iter()
         .find(|attr| matches!(attr.style, syn::AttrStyle::Outer))
-    else {
-        return Ok(String::new());
-    };
-    let start = first.pound_token.span.start();
-    let end = item_impl
-        .defaultness
-        .map(|token| token.span)
+        .map(|attr| attr.pound_token.span)
+        .or(item_impl.defaultness.map(|token| token.span))
         .or(item_impl.unsafety.map(|token| token.span))
         .unwrap_or(item_impl.impl_token.span)
         .start();
+    let end = item_impl.brace_token.span.open().start();
     let text = source_between(lines, start, end)?;
     let rows: Vec<&str> = text
         .split('\n')
@@ -127,37 +120,5 @@ fn outer_attrs(lines: &[&str], item_impl: &syn::ItemImpl) -> Result<String> {
             }
         })
         .collect();
-    Ok(format!("{}\n", rows.join("\n").trim_end()))
-}
-
-/// Build the impl header string (e.g., `impl<T: Clone> Foo<T>` or `impl Trait for Foo`).
-pub(super) fn build_impl_header(item_impl: &syn::ItemImpl) -> String {
-    let unsafety = item_impl.unsafety.map(|_| "unsafe ").unwrap_or("");
-
-    let generics = if item_impl.generics.params.is_empty() {
-        String::new()
-    } else {
-        let params = &item_impl.generics;
-        quote::quote!(#params).to_string()
-    };
-
-    let trait_part = if let Some((bang, path, _for_token)) = &item_impl.trait_ {
-        let bang = if bang.is_some() { "! " } else { "" };
-        let path = quote::quote!(#path).to_string();
-        format!("{bang}{path} for ")
-    } else {
-        String::new()
-    };
-
-    let self_ty = &item_impl.self_ty;
-    let self_ty_str = quote::quote!(#self_ty).to_string();
-
-    let where_clause = item_impl
-        .generics
-        .where_clause
-        .as_ref()
-        .map(|w| format!(" {}", quote::quote!(#w)))
-        .unwrap_or_default();
-
-    format!("{unsafety}impl{generics} {trait_part}{self_ty_str}{where_clause}")
+    Ok(rows.join("\n"))
 }

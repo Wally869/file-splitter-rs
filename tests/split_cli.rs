@@ -359,6 +359,39 @@ fn impl_header_comments_and_inner_attributes_are_on_every_block() {
 }
 
 #[test]
+fn generic_impl_headers_are_copied_as_written() {
+    let (copy, _) = split_fixture("impl_generic_header");
+    let engine = copy.join("src").join("engine");
+    let files = read_all(&rust_files(&engine, &["child.rs"]));
+    let headers = [
+        "impl<T> /* x */ Wrapper<T> where T: Clone // y\n{",
+        "impl<T> Wrapper<T>\nwhere\n    // comment: in where clause\n    T: Clone\n        + Default,\n{",
+    ];
+
+    let mut blocks = [0; 2];
+    for (path, text) in &files {
+        let text = text.replace("\r\n", "\n");
+        for (at, _) in text.match_indices("impl<T>") {
+            let header = headers
+                .iter()
+                .position(|header| text[at..].starts_with(header))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "impl<T> header not as written in {}:\n{}",
+                        path.display(),
+                        &text[at..]
+                    )
+                });
+            blocks[header] += 1;
+        }
+    }
+    assert!(
+        blocks.iter().all(|&count| count >= 2),
+        "each Wrapper impl is not split across blocks: {blocks:?}"
+    );
+}
+
+#[test]
 fn inline_module_comments_and_inner_attributes_are_kept() {
     let (copy, _) = split_fixture("inline_comments");
     let tests_dir = copy.join("src").join("engine").join("tests");
@@ -431,10 +464,13 @@ fn mod_rs_source_stays_the_root_with_parts_beside_it() {
         "part_1.rs",
         "part_2.rs",
         "part_3.rs",
+        "part_4.rs",
+        "part_5.rs",
+        "part_6.rs",
     ] {
         assert!(engine.join(file).is_file(), "missing engine/{file}");
     }
-    assert!(!engine.join("part_4.rs").exists());
+    assert!(!engine.join("part_7.rs").exists());
     assert!(engine.join("tests").join("mod.rs").is_file());
     assert!(engine.join("tests").join("part_0.rs").is_file());
     assert!(!engine.join("mod").exists(), "parts went to engine/mod/");
