@@ -246,6 +246,108 @@ fn moved_code_keeps_literal_text() {
     }
 }
 
+/// The line before the first line of `files` that equals `line`, with that file's text.
+fn line_before<'a>(files: &'a [(PathBuf, String)], line: &str) -> (&'a PathBuf, &'a str) {
+    for (path, text) in files {
+        let rows: Vec<&str> = text.lines().collect();
+        if let Some(at) = rows.iter().position(|row| *row == line) {
+            assert!(at > 0, "`{line}` is the first line of {}", path.display());
+            return (path, rows[at - 1]);
+        }
+    }
+    panic!("no output file has the line `{line}`");
+}
+
+#[test]
+fn comments_stay_next_to_their_items() {
+    let out = split_mixed("comments");
+    let files = read_all(&rust_files(&out, &[]));
+
+    let (path, before) = line_before(
+        &files,
+        "pub(in super::super) fn free_banner() -> &'static str {",
+    );
+    assert_eq!(before, "// comment: before free_banner");
+    assert!(!path.ends_with("mod.rs"), "free_banner stayed in the root");
+
+    let (path, before) = line_before(
+        &files,
+        "    pub(in super::super) fn panel_raw(&self) -> &'static str {",
+    );
+    assert_eq!(before, "    // comment: before panel_raw");
+    assert!(!path.ends_with("mod.rs"), "panel_raw stayed in the root");
+
+    let root_path = out.join("mod.rs");
+    let root = fs::read_to_string(&root_path).expect("read root");
+    let root_only = [(root_path, root.clone())];
+    let (_, before) = line_before(&root_only, "const SCALE: u32 = 3;");
+    assert_eq!(before, "// comment: between LIMIT and SCALE");
+    assert!(
+        root.trim_end().ends_with("// comment: end of file"),
+        "the end-of-file comment is not at the end of the root:\n{root}"
+    );
+}
+
+#[test]
+fn impl_attributes_are_on_every_emitted_block() {
+    let (copy, _) = split_fixture("impl_attrs");
+    let engine = copy.join("src").join("engine");
+    let files = read_all(&rust_files(&engine, &["child.rs"]));
+
+    let mut blocks = 0;
+    let mut root_blocks = 0;
+    for (path, text) in &files {
+        let rows: Vec<&str> = text.lines().collect();
+        for (at, row) in rows.iter().enumerate() {
+            if *row != "impl Engine {" {
+                continue;
+            }
+            assert!(
+                at > 0 && rows[at - 1] == "#[cfg(not(any()))]",
+                "`impl Engine` without its attribute in {}:\n{text}",
+                path.display()
+            );
+            blocks += 1;
+            if path.ends_with("engine/mod.rs") {
+                root_blocks += 1;
+            }
+        }
+    }
+    assert_eq!(root_blocks, 1, "no partial impl Engine in the root");
+    assert!(blocks >= 3, "only {blocks} impl Engine blocks");
+}
+
+#[test]
+fn inline_module_declaration_keeps_visibility_and_attributes() {
+    let (copy, _) = split_fixture("inline_vis");
+    let root =
+        fs::read_to_string(copy.join("src").join("engine").join("mod.rs")).expect("read root");
+    assert!(
+        root.contains("#[allow(dead_code)]\npub mod shapes;"),
+        "the shapes declaration lost its visibility or attribute:\n{root}"
+    );
+    assert!(root.contains("#[cfg(test)]\nmod tests;"));
+}
+
+#[test]
+fn super_rewrite_skips_literals_and_comments() {
+    let out = split_mixed("super_paths");
+    let files = read_all(&rust_files(&out, &["mod.rs"]));
+    let (_, text) = files
+        .iter()
+        .find(|(_, text)| text.contains("fn path_text() -> String {"))
+        .expect("path_text is in a part");
+    for kept in [
+        "    // super::x stays as written",
+        "\"super::x\"",
+        "r\"super::\"",
+        "let real = super::super::Outer::NAME;",
+    ] {
+        assert!(text.contains(kept), "`{kept}` is not in the part:\n{text}");
+    }
+    assert_eq!(text.matches("super::super::").count(), 1, "{text}");
+}
+
 #[test]
 fn mod_rs_source_stays_the_root_with_parts_beside_it() {
     let (copy, _) = split_fixture("layout");

@@ -53,20 +53,96 @@ pub(super) fn visibility_fix(source: &Dedented, parts: &FnParts) -> Result<Optio
     Ok(Some(VisFix { range, replacement }))
 }
 
-/// The source lines of a syntax node, as written.
-pub(super) fn extract_source(lines: &[&str], node: &impl ToTokens) -> Result<String> {
+/// The source lines of a syntax node, as written, from `from_line` when it comes first.
+pub(super) fn extract_source(
+    lines: &[&str],
+    node: &impl ToTokens,
+    from_line: Option<usize>,
+) -> Result<String> {
     let (start, end) = token_lines(&node.to_token_stream()).context("item has no tokens")?;
+    let start = from_line.map_or(start, |from| from.min(start));
     let rows = lines
         .get(start - 1..end)
         .with_context(|| format!("lines {start}-{end} are outside the source"))?;
     Ok(rows.join("\n"))
 }
 
-/// The source lines of a syntax node, less the indent common to its code rows. A row that
-/// starts inside a literal keeps its leading whitespace, which is literal content.
-pub(super) fn dedented_source(lines: &[&str], node: &impl ToTokens) -> Result<Dedented> {
+/// The first line of the comments before an item that starts on `start`: the first
+/// non-blank line after `prev_end`, the last line of the item before it.
+pub(super) fn leading_start(lines: &[&str], prev_end: usize, start: usize) -> usize {
+    (prev_end + 1..start)
+        .find(|&line| {
+            lines
+                .get(line - 1)
+                .is_some_and(|row| !row.trim().is_empty())
+        })
+        .unwrap_or(start)
+}
+
+/// Lines `first` to `last` (1-indexed, inclusive) less their outer blank lines and common
+/// indent, or `None` when they are all blank.
+pub(super) fn comment_rows(lines: &[&str], first: usize, last: usize) -> Result<Option<String>> {
+    if first > last {
+        return Ok(None);
+    }
+    let rows = lines
+        .get(first - 1..last)
+        .with_context(|| format!("lines {first}-{last} are outside the source"))?;
+    let Some(top) = rows.iter().position(|row| !row.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let bottom = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .context("a non-blank row exists")?;
+    let rows = &rows[top..=bottom];
+    let indent = rows
+        .iter()
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| leading_blanks(row))
+        .min()
+        .unwrap_or(0);
+    let text = rows
+        .iter()
+        .map(|row| &row[leading_blanks(row).min(indent)..])
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(Some(text))
+}
+
+/// The source text from `start` to `end`.
+pub(super) fn source_between(lines: &[&str], start: LineColumn, end: LineColumn) -> Result<String> {
+    let rows = lines
+        .get(start.line - 1..end.line)
+        .with_context(|| format!("lines {}-{} are outside the source", start.line, end.line))?;
+    let mut text = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let line = start.line + index;
+        let from = if line == start.line { start.column } else { 0 };
+        let to = if line == end.line {
+            end.column
+        } else {
+            usize::MAX
+        };
+        if index > 0 {
+            text.push('\n');
+        }
+        text.extend(row.chars().skip(from).take(to.saturating_sub(from)));
+    }
+    Ok(text)
+}
+
+/// The source lines of a syntax node from `from_line` when it comes first, less the indent
+/// common to its code rows. A row that starts inside a literal keeps its leading
+/// whitespace, which is literal content.
+pub(super) fn dedented_source(
+    lines: &[&str],
+    node: &impl ToTokens,
+    from_line: Option<usize>,
+) -> Result<Dedented> {
     let tokens = node.to_token_stream();
     let (first_line, last_line) = token_lines(&tokens).context("item has no tokens")?;
+    let first_line = from_line.map_or(first_line, |from| from.min(first_line));
     let rows = lines
         .get(first_line - 1..last_line)
         .with_context(|| format!("lines {first_line}-{last_line} are outside the source"))?;

@@ -35,9 +35,10 @@ pub(super) fn byte_offset(source: &Dedented, at: LineColumn) -> Result<usize> {
 pub(super) fn try_classify_inline_module(
     item_mod: &syn::ItemMod,
     lines: &[&str],
+    from_line: usize,
 ) -> Result<Option<InlineModule>> {
     // Only handle inline modules (with content), not external `mod foo;`
-    let Some((_brace, items)) = item_mod.content.as_ref() else {
+    let Some((brace, items)) = item_mod.content.as_ref() else {
         return Ok(None);
     };
 
@@ -51,20 +52,16 @@ pub(super) fn try_classify_inline_module(
 
     let name = item_mod.ident.to_string();
 
-    // Build attrs source text
-    let attrs_source = if item_mod.attrs.is_empty() {
-        String::new()
-    } else {
-        let attr_start = attr_start_line(&item_mod.attrs, item_mod.mod_token.span);
-        let attr_end = item_mod.mod_token.span.start().line;
-        let start_idx = attr_start.saturating_sub(1);
-        let end_idx = attr_end.saturating_sub(1);
-        if start_idx < lines.len() && end_idx <= lines.len() && start_idx < end_idx {
-            lines[start_idx..end_idx].join("\n")
-        } else {
-            String::new()
-        }
-    };
+    let open = brace.span.open().start();
+    let head = source_between(
+        lines,
+        LineColumn {
+            line: from_line,
+            column: 0,
+        },
+        open,
+    )?;
+    let declaration = format!("{};", head.trim_end());
 
     // Classify items inside the module
     let mut mod_use_statements = Vec::new();
@@ -79,16 +76,17 @@ pub(super) fn try_classify_inline_module(
                     defaultness: None,
                     sig: &item_fn.sig,
                 };
-                mod_splittable.push(moved_fn(dedented_source(lines, item)?, parts, None)?);
+                let source = dedented_source(lines, item, None)?;
+                mod_splittable.push(moved_fn(source, parts, None)?);
             }
             Item::Impl(item_impl) => {
-                classify_impl(item_impl, lines, &mut mod_splittable, &mut mod_items)?;
+                classify_impl(item_impl, lines, None, &mut mod_splittable, &mut mod_items)?;
             }
             Item::Use(_) => {
-                mod_use_statements.push(dedented_source(lines, item)?.text);
+                mod_use_statements.push(dedented_source(lines, item, None)?.text);
             }
             _ => {
-                let text = dedented_source(lines, item)?.text;
+                let text = dedented_source(lines, item, None)?.text;
                 mod_items.push(ModItem { source_text: text });
             }
         }
@@ -96,7 +94,7 @@ pub(super) fn try_classify_inline_module(
 
     Ok(Some(InlineModule {
         name,
-        attrs_source,
+        declaration,
         use_statements: mod_use_statements,
         splittable_items: mod_splittable,
         mod_items,
@@ -132,13 +130,4 @@ pub(super) fn leading_blanks(line: &str) -> usize {
     line.bytes()
         .take_while(|b| matches!(b, b' ' | b'\t'))
         .count()
-}
-
-/// Get the start line, considering attributes.
-pub(super) fn attr_start_line(attrs: &[syn::Attribute], fallback: proc_macro2::Span) -> usize {
-    if let Some(attr) = attrs.first() {
-        attr.pound_token.span.start().line
-    } else {
-        fallback.start().line
-    }
 }

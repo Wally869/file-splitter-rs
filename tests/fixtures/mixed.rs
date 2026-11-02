@@ -25,6 +25,7 @@ macro_rules! square {
 
 static LIMIT: u32 = 10;
 
+// comment: between LIMIT and SCALE
 const SCALE: u32 = 3;
 
 type Size = u32;
@@ -47,6 +48,7 @@ impl Panel {
             third line"
     }
 
+    // comment: before panel_raw
     fn panel_raw(&self) -> &'static str {
         r#"top "raw" method
       indented
@@ -60,6 +62,7 @@ impl fmt::Display for Panel {
     }
 }
 
+// comment: before free_banner
 fn free_banner() -> &'static str {
     "top fn
   second line
@@ -70,6 +73,12 @@ fn free_raw() -> &'static str {
     r#"top "raw" fn
       indented
 end"#
+}
+
+fn path_text() -> String {
+    // super::x stays as written
+    let real = super::Outer::NAME;
+    format!("{}{}{}", "super::x", r"super::", real)
 }
 
 pub fn measure(panel: &Panel) -> Size {
@@ -113,3 +122,5 @@ end"#
         }
     }
 }
+
+// comment: end of file

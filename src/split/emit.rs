@@ -1,8 +1,9 @@
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use regex::Regex;
 
 use super::cluster::{self, Cluster};
@@ -64,10 +65,13 @@ pub fn emit(
 
     let mut tail = Vec::new();
     for inline_mod in &classified.inline_modules {
-        if !inline_mod.attrs_source.is_empty() {
-            tail.push(inline_mod.attrs_source.clone());
+        tail.push(inline_mod.declaration.clone());
+    }
+    if let Some(epilogue) = &classified.epilogue {
+        if !tail.is_empty() {
+            tail.push(String::new());
         }
-        tail.push(format!("mod {};", inline_mod.name));
+        tail.push(epilogue.clone());
     }
 
     let mut planned = Vec::new();
@@ -78,9 +82,9 @@ pub fn emit(
         clusters,
         &tail,
         &mut planned,
-    );
+    )?;
     for inline_mod in &classified.inline_modules {
-        plan_inline_module(&module_dir, inline_mod, budget, &mut planned);
+        plan_inline_module(&module_dir, inline_mod, budget, &mut planned)?;
     }
 
     for (path, _) in &planned {
@@ -122,7 +126,7 @@ fn plan_inline_module(
     inline_mod: &InlineModule,
     budget: usize,
     planned: &mut Vec<(PathBuf, String)>,
-) {
+) -> Result<()> {
     let mod_dir = parent_dir.join(&inline_mod.name);
     let clusters = cluster::cluster_items(&inline_mod.splittable_items, budget);
 
@@ -134,7 +138,7 @@ fn plan_inline_module(
             .map(|item| item.source_text.clone()),
     );
     let root_path = mod_dir.join("mod.rs");
-    plan_module(&mod_dir, root_path, &head, &clusters, &[], planned);
+    plan_module(&mod_dir, root_path, &head, &clusters, &[], planned)?;
 
     println!(
         "  Inline module '{}': {} clusters",
@@ -145,6 +149,7 @@ fn plan_inline_module(
         let names: Vec<&str> = c.items.iter().map(|item| item.name.as_str()).collect();
         println!("    part_{i}: {} items — {:?}", c.items.len(), names);
     }
+    Ok(())
 }
 
 /// Plan a module root and its parts. The root is `head`, the part declarations with the
@@ -156,8 +161,8 @@ fn plan_module(
     clusters: &[Cluster],
     tail: &[String],
     planned: &mut Vec<(PathBuf, String)>,
-) {
-    let parts: Vec<String> = clusters.iter().map(render_part).collect();
+) -> Result<()> {
+    let parts: Vec<String> = clusters.iter().map(render_part).collect::<Result<_>>()?;
     let head_text = head.join("\n\n");
 
     let mut lines = Vec::new();
@@ -187,6 +192,7 @@ fn plan_module(
     for (i, content) in parts.into_iter().enumerate() {
         planned.push((dir.join(format!("part_{i}.rs")), content));
     }
+    Ok(())
 }
 
 /// The root's `use` lines for moved free functions: an item with a visibility keeps it as a
@@ -220,43 +226,93 @@ fn part_imports(head_text: &str, clusters: &[Cluster], parts: &[String]) -> Vec<
     imports
 }
 
-static SUPER_CHAIN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"((?:super::)+)").expect("valid regex"));
-static PUB_SUPER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"pub\(\s*(?:in\s+)?super\s*\)").expect("valid regex"));
+fn is_path_sep(trees: &[TokenTree], at: usize) -> bool {
+    matches!(
+        (trees.get(at), trees.get(at + 1)),
+        (Some(TokenTree::Punct(first)), Some(TokenTree::Punct(second)))
+            if first.as_char() == ':' && first.spacing() == Spacing::Joint && second.as_char() == ':'
+    )
+}
 
-/// Fix `super` paths in moved source text: the code moved one level deeper (into
+fn is_super(trees: &[TokenTree], at: usize) -> bool {
+    matches!(trees.get(at), Some(TokenTree::Ident(ident)) if ident == "super")
+}
+
+/// `(super)` or `(in super)` after `pub`.
+fn is_super_restriction(trees: &[TokenTree], at: usize) -> bool {
+    let Some(TokenTree::Group(group)) = trees.get(at) else {
+        return false;
+    };
+    let after_pub = at > 0 && matches!(&trees[at - 1], TokenTree::Ident(ident) if ident == "pub");
+    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+    let restriction = match inner.as_slice() {
+        [TokenTree::Ident(only)] => only == "super",
+        [TokenTree::Ident(word), TokenTree::Ident(only)] => word == "in" && only == "super",
+        _ => false,
+    };
+    after_pub && group.delimiter() == Delimiter::Parenthesis && restriction
+}
+
+/// The edits that fix `super` paths of moved code: it moved one level deeper (into
 /// `part_N.rs`), so every `super::` chain and every `pub(super)` needs one extra `super`.
-fn fix_super_paths(text: &str) -> String {
-    let chains = SUPER_CHAIN.replace_all(text, "super::$1");
-    PUB_SUPER
-        .replace_all(&chains, "pub(in super::super)")
-        .to_string()
+/// Only tokens are edited; literals and comments keep their text.
+fn super_edits(tokens: TokenStream, edits: &mut Vec<(Range<usize>, &'static str)>) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (at, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(_) if is_super_restriction(&trees, at) => {
+                edits.push((tree.span().byte_range(), "(in super::super)"));
+            }
+            TokenTree::Group(group) => super_edits(group.stream(), edits),
+            TokenTree::Ident(_) if is_super(&trees, at) && is_path_sep(&trees, at + 1) => {
+                let chain_start =
+                    !(at >= 3 && is_path_sep(&trees, at - 2) && is_super(&trees, at - 3));
+                if chain_start {
+                    let start = tree.span().byte_range().start;
+                    edits.push((start..start, "super::"));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The source of an item as it reads in a part.
-fn moved_source(item: &SplittableItem) -> String {
+fn moved_source(item: &SplittableItem) -> Result<String> {
     let text = &item.source_text;
-    match &item.vis_fix {
-        None => fix_super_paths(text),
-        Some(fix) => format!(
-            "{}{}{}",
-            fix_super_paths(&text[..fix.range.start]),
-            fix.replacement,
-            fix_super_paths(&text[fix.range.end..])
-        ),
+    let tokens: TokenStream = text
+        .parse()
+        .map_err(|e| anyhow::anyhow!("moved item `{}` does not tokenize: {e}", item.name))?;
+    let mut edits = Vec::new();
+    super_edits(tokens, &mut edits);
+    if let Some(fix) = &item.vis_fix {
+        edits.push((fix.range.clone(), fix.replacement));
     }
+    edits.sort_by_key(|(range, _)| range.start);
+
+    let mut moved = String::new();
+    let mut at = 0;
+    for (range, replacement) in edits {
+        if range.start < at {
+            anyhow::bail!("overlapping edits in moved item `{}`", item.name);
+        }
+        moved.push_str(&text[at..range.start]);
+        moved.push_str(replacement);
+        at = range.end;
+    }
+    moved.push_str(&text[at..]);
+    Ok(moved)
 }
 
 /// Render a part: `use super::*;`, its free functions, then its methods grouped by impl
 /// header in order of first appearance.
-fn render_part(cluster: &Cluster) -> String {
+fn render_part(cluster: &Cluster) -> Result<String> {
     let mut lines = vec!["use super::*;".to_string(), String::new()];
 
     let mut impl_groups: Vec<(&str, Vec<&SplittableItem>)> = Vec::new();
     for item in &cluster.items {
         let Some(ctx) = &item.impl_context else {
-            lines.push(moved_source(item));
+            lines.push(moved_source(item)?);
             lines.push(String::new());
             continue;
         };
@@ -272,12 +328,12 @@ fn render_part(cluster: &Cluster) -> String {
     for (header, methods) in impl_groups {
         lines.push(format!("{header} {{"));
         for item in methods {
-            lines.push(indent_rows(&moved_source(item), &item.literal_rows));
+            lines.push(indent_rows(&moved_source(item)?, &item.literal_rows));
             lines.push(String::new());
         }
         lines.push("}".to_string());
         lines.push(String::new());
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }

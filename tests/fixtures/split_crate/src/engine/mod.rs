@@ -12,9 +12,12 @@ pub fn run(engine: &Engine) -> u32 {
     engine.alpha_start() + gamma_helper()
 }
 
+#[cfg(not(any()))]
 impl Engine {
+    const STEP: u32 = 1;
+
     fn alpha_start(&self) -> u32 {
-        let first = self.counter.value();
+        let first = self.counter.value() * Self::STEP;
         let second = first + 1;
         let third = second + 1;
         self.beta_finish(third)
@@ -64,6 +67,13 @@ fn gamma_helper() -> u32 {
     let a = 1;
     let b = 2;
     twice!(a + b) + unsafe { Bits { int: 0 }.int }
+}
+
+#[allow(dead_code)]
+pub mod shapes {
+    pub fn unit_side() -> u32 {
+        1
+    }
 }
 
 #[cfg(test)]

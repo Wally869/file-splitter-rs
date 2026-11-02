@@ -60,8 +60,9 @@ pub struct ModItem {
 pub struct InlineModule {
     /// Module name, e.g. "tests"
     pub name: String,
-    /// Attributes source text, e.g. "#[cfg(test)]"
-    pub attrs_source: String,
+    /// The declaration that replaces the module in the root, as written up to its brace:
+    /// comments, attributes and visibility, e.g. "#[cfg(test)]\nmod tests;"
+    pub declaration: String,
     /// Use statements inside the module
     pub use_statements: Vec<String>,
     /// Splittable items (functions/methods) inside the module
@@ -80,6 +81,8 @@ pub struct ClassifiedFile {
     pub splittable_items: Vec<SplittableItem>,
     /// Inline modules with splittable content (e.g. test modules)
     pub inline_modules: Vec<InlineModule>,
+    /// Comments after the last item
+    pub epilogue: Option<String>,
 }
 
 /// The parts of a fn declaration that decide its visibility edit.
@@ -114,7 +117,11 @@ pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> 
         .unwrap_or(lines.len() + 1);
     let preamble = lines[..first_item_line - 1].join("\n");
 
+    let mut prev_end = first_item_line - 1;
     for item in &file.items {
+        let (start, end) = token_lines(&item.to_token_stream()).context("item has no tokens")?;
+        let from = leading_start(&lines, prev_end, start);
+        prev_end = end;
         match item {
             Item::Fn(item_fn) => {
                 let parts = FnParts {
@@ -122,33 +129,42 @@ pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> 
                     defaultness: None,
                     sig: &item_fn.sig,
                 };
-                splittable_items.push(moved_fn(dedented_source(&lines, item)?, parts, None)?);
+                let source = dedented_source(&lines, item, Some(from))?;
+                splittable_items.push(moved_fn(source, parts, None)?);
             }
             Item::Impl(item_impl) => {
-                classify_impl(item_impl, &lines, &mut splittable_items, &mut mod_items)?;
+                classify_impl(
+                    item_impl,
+                    &lines,
+                    Some(from),
+                    &mut splittable_items,
+                    &mut mod_items,
+                )?;
             }
             Item::Mod(item_mod) => {
                 // Check if this is an inline module with splittable content
-                if let Some(inline) = try_classify_inline_module(item_mod, &lines)? {
+                if let Some(inline) = try_classify_inline_module(item_mod, &lines, from)? {
                     inline_modules.push(inline);
                 } else {
-                    let text = extract_source(&lines, item)?;
+                    let text = extract_source(&lines, item, Some(from))?;
                     mod_items.push(ModItem { source_text: text });
                 }
             }
             // Everything else stays in mod.rs
             _ => {
-                let text = extract_source(&lines, item)?;
+                let text = extract_source(&lines, item, Some(from))?;
                 mod_items.push(ModItem { source_text: text });
             }
         }
     }
+    let epilogue = comment_rows(&lines, prev_end + 1, lines.len())?;
 
     Ok(ClassifiedFile {
         preamble,
         mod_items,
         splittable_items,
         inline_modules,
+        epilogue,
     })
 }
 
@@ -171,9 +187,12 @@ mod fn_source;
 mod impls;
 mod inline_module;
 
+use fn_source::comment_rows;
 use fn_source::dedented_source;
 use fn_source::extract_source;
+use fn_source::leading_start;
 use fn_source::moved_fn;
+use fn_source::source_between;
 use impls::classify_impl;
 use inline_module::byte_offset;
 use inline_module::collect_literal_rows;
