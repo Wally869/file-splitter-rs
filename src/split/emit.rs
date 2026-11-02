@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 
 use super::cluster::{self, Cluster};
-use super::parse::{ClassifiedFile, InlineModule, SplittableItem};
+use super::parse::{ClassifiedFile, InlineModule, SplittableItem, indent_rows};
 
 /// A file the split wrote, with its line count.
 pub struct Written {
@@ -198,7 +198,7 @@ fn part_imports(head_text: &str, clusters: &[Cluster], parts: &[String]) -> Vec<
         for item in cluster
             .items
             .iter()
-            .filter(|item| item.impl_context.is_none())
+            .filter(|item| item.impl_context.is_none() && !item.trait_impl)
         {
             let name = &item.name;
             if !item.root_vis.is_empty() {
@@ -272,9 +272,7 @@ fn render_part(cluster: &Cluster) -> String {
     for (header, methods) in impl_groups {
         lines.push(format!("{header} {{"));
         for item in methods {
-            for line in moved_source(item).lines() {
-                lines.push(format!("    {line}"));
-            }
+            lines.push(indent_rows(&moved_source(item), &item.literal_rows));
             lines.push(String::new());
         }
         lines.push("}".to_string());

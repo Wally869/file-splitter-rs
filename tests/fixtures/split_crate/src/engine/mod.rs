@@ -28,10 +28,42 @@ impl Engine {
     }
 }
 
+pub trait Shape {
+    type Output;
+    const SIDES: u32;
+
+    fn area(&self) -> Self::Output;
+    fn sides(&self) -> u32;
+}
+
+pub union Bits {
+    pub int: u32,
+    pub float: f32,
+}
+
+macro_rules! twice {
+    ($value:expr) => {
+        $value * 2
+    };
+}
+
+impl Shape for Engine {
+    type Output = u32;
+    const SIDES: u32 = 4;
+
+    fn area(&self) -> u32 {
+        self.counter.value() * Self::SIDES
+    }
+
+    fn sides(&self) -> u32 {
+        Self::SIDES
+    }
+}
+
 fn gamma_helper() -> u32 {
     let a = 1;
     let b = 2;
-    a + b
+    twice!(a + b) + unsafe { Bits { int: 0 }.int }
 }
 
 #[cfg(test)]
