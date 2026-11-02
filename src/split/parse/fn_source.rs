@@ -110,6 +110,54 @@ pub(super) fn comment_rows(lines: &[&str], first: usize, last: usize) -> Result<
     Ok(Some(text))
 }
 
+/// The top of a block body as written: from after its `{` to the end of line `prev_end` (the
+/// last line of its inner attributes, or the brace line), stopping at the first member when
+/// that starts earlier. Comments and inner attributes, less outer blank rows and the indent of
+/// the rows after the first, or `None` when blank.
+pub(super) fn body_top(
+    lines: &[&str],
+    brace: &syn::token::Brace,
+    prev_end: usize,
+    first_member: Option<LineColumn>,
+) -> Result<Option<String>> {
+    let open = brace.span.open().end();
+    let stop = [
+        Some(LineColumn {
+            line: prev_end,
+            column: usize::MAX,
+        }),
+        Some(brace.span.close().start()),
+        first_member,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .context("a stop position exists")?;
+    let text = source_between(lines, open, stop)?;
+    let rows: Vec<&str> = text.split('\n').collect();
+    let indent = rows[1..]
+        .iter()
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| leading_blanks(row))
+        .min()
+        .unwrap_or(0);
+    let rows: Vec<&str> = std::iter::once(rows[0].trim_start())
+        .chain(
+            rows[1..]
+                .iter()
+                .map(|row| &row[leading_blanks(row).min(indent)..]),
+        )
+        .collect();
+    let Some(top) = rows.iter().position(|row| !row.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let bottom = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .context("a non-blank row exists")?;
+    Ok(Some(rows[top..=bottom].join("\n").trim_end().to_string()))
+}
+
 /// The source text from `start` to `end`.
 pub(super) fn source_between(lines: &[&str], start: LineColumn, end: LineColumn) -> Result<String> {
     let rows = lines

@@ -47,6 +47,8 @@ pub struct ImplContext {
     pub header: String,
     /// The self type as a string for display
     pub self_type: String,
+    /// Comments and inner attributes after the impl's `{`, copied into every emitted block
+    pub body_top: Option<String>,
 }
 
 /// Items that stay in mod.rs, stored as raw source text.
@@ -63,12 +65,16 @@ pub struct InlineModule {
     /// The declaration that replaces the module in the root, as written up to its brace:
     /// comments, attributes and visibility, e.g. "#[cfg(test)]\nmod tests;"
     pub declaration: String,
+    /// Comments and inner attributes after the module's `{`, which open its module file
+    pub body_top: Option<String>,
     /// Use statements inside the module
     pub use_statements: Vec<String>,
     /// Splittable items (functions/methods) inside the module
     pub splittable_items: Vec<SplittableItem>,
     /// Non-function items inside the module (consts, types, etc.)
     pub mod_items: Vec<ModItem>,
+    /// Comments after the module's last item
+    pub epilogue: Option<String>,
 }
 
 /// Result of classifying a file's items.
@@ -187,6 +193,7 @@ mod fn_source;
 mod impls;
 mod inline_module;
 
+use fn_source::body_top;
 use fn_source::comment_rows;
 use fn_source::dedented_source;
 use fn_source::extract_source;
@@ -196,6 +203,8 @@ use fn_source::source_between;
 use impls::classify_impl;
 use inline_module::byte_offset;
 use inline_module::collect_literal_rows;
+use inline_module::first_token_start;
+use inline_module::inner_attrs_end;
 use inline_module::leading_blanks;
 use inline_module::token_lines;
 use inline_module::try_classify_inline_module;

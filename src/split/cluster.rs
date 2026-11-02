@@ -301,6 +301,7 @@ mod tests {
             impl_context: method.then(|| super::super::parse::ImplContext {
                 header: "impl Foo".to_string(),
                 self_type: "Foo".to_string(),
+                body_top: None,
             }),
             trait_impl: false,
             public,

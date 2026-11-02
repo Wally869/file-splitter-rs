@@ -7,7 +7,7 @@ use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use regex::Regex;
 
 use super::cluster::{self, Cluster};
-use super::parse::{ClassifiedFile, InlineModule, SplittableItem, indent_rows};
+use super::parse::{ClassifiedFile, ImplContext, InlineModule, SplittableItem, indent_rows};
 
 /// A file the split wrote, with its line count.
 pub struct Written {
@@ -130,15 +130,17 @@ fn plan_inline_module(
     let mod_dir = parent_dir.join(&inline_mod.name);
     let clusters = cluster::cluster_items(&inline_mod.splittable_items, budget);
 
-    let mut head = inline_mod.use_statements.clone();
+    let mut head: Vec<String> = inline_mod.body_top.iter().cloned().collect();
+    head.extend(inline_mod.use_statements.iter().cloned());
     head.extend(
         inline_mod
             .mod_items
             .iter()
             .map(|item| item.source_text.clone()),
     );
+    let tail: Vec<String> = inline_mod.epilogue.iter().cloned().collect();
     let root_path = mod_dir.join("mod.rs");
-    plan_module(&mod_dir, root_path, &head, &clusters, &[], planned)?;
+    plan_module(&mod_dir, root_path, &head, &clusters, &tail, planned)?;
 
     println!(
         "  Inline module '{}': {} clusters",
@@ -309,7 +311,7 @@ fn moved_source(item: &SplittableItem) -> Result<String> {
 fn render_part(cluster: &Cluster) -> Result<String> {
     let mut lines = vec!["use super::*;".to_string(), String::new()];
 
-    let mut impl_groups: Vec<(&str, Vec<&SplittableItem>)> = Vec::new();
+    let mut impl_groups: Vec<(&ImplContext, Vec<&SplittableItem>)> = Vec::new();
     for item in &cluster.items {
         let Some(ctx) = &item.impl_context else {
             lines.push(moved_source(item)?);
@@ -318,15 +320,19 @@ fn render_part(cluster: &Cluster) -> Result<String> {
         };
         match impl_groups
             .iter_mut()
-            .find(|(header, _)| *header == ctx.header)
+            .find(|(group, _)| group.header == ctx.header && group.body_top == ctx.body_top)
         {
             Some((_, methods)) => methods.push(item),
-            None => impl_groups.push((&ctx.header, vec![item])),
+            None => impl_groups.push((ctx, vec![item])),
         }
     }
 
-    for (header, methods) in impl_groups {
-        lines.push(format!("{header} {{"));
+    for (ctx, methods) in impl_groups {
+        lines.push(format!("{} {{", ctx.header));
+        if let Some(top) = &ctx.body_top {
+            lines.push(indent_rows(top, &[]));
+            lines.push(String::new());
+        }
         for item in methods {
             lines.push(indent_rows(&moved_source(item)?, &item.literal_rows));
             lines.push(String::new());

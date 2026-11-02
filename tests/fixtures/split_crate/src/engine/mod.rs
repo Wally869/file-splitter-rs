@@ -12,8 +12,12 @@ pub fn run(engine: &Engine) -> u32 {
     engine.alpha_start() + gamma_helper()
 }
 
+#[allow(unused_mut)]
+// comment: between impl Engine attributes
 #[cfg(not(any()))]
-impl Engine {
+impl Engine { // comment: after impl Engine brace
+    #![allow(dead_code)]
+
     const STEP: u32 = 1;
 
     fn alpha_start(&self) -> u32 {
@@ -77,12 +81,24 @@ pub mod shapes {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests { // comment: after tests brace
+    #![allow(unused_imports)]
+
+    // comment: before use super
     use super::*;
 
+    // comment: before delta_runs
     #[test]
     fn delta_runs() {
         let engine = Engine { counter: Counter::new() };
         assert!(run(&engine) > 0);
     }
+
+    // comment: before epsilon_runs
+    #[test]
+    fn epsilon_runs() {
+        assert_eq!(gamma_helper(), 6);
+    }
+
+    // comment: end of tests
 }

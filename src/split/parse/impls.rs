@@ -38,17 +38,20 @@ pub(super) fn classify_impl(
     };
     let header = format!(
         "{}{}",
-        outer_attrs(lines, &item_impl.attrs)?,
+        outer_attrs(lines, item_impl)?,
         build_impl_header(item_impl)
     );
 
     // Inner attributes stay out of the first member's leading comments.
-    let mut prev_end = item_impl
-        .attrs
-        .iter()
-        .filter(|attr| matches!(attr.style, syn::AttrStyle::Inner(_)))
-        .map(|attr| attr.bracket_token.span.close().end().line)
-        .fold(item_impl.brace_token.span.open().start().line, usize::max);
+    let mut prev_end = inner_attrs_end(
+        &item_impl.attrs,
+        item_impl.brace_token.span.open().start().line,
+    );
+    let first_member = item_impl
+        .items
+        .first()
+        .and_then(|member| first_token_start(&member.to_token_stream()));
+    let body_top = body_top(lines, &item_impl.brace_token, prev_end, first_member)?;
     let mut kept = Vec::new();
     for impl_item in &item_impl.items {
         let (start, end) =
@@ -65,6 +68,7 @@ pub(super) fn classify_impl(
                 let context = ImplContext {
                     header: header.clone(),
                     self_type: self_type.clone(),
+                    body_top: body_top.clone(),
                 };
                 let source = dedented_source(lines, method, from)?;
                 splittable_items.push(moved_fn(source, parts, Some(context))?);
@@ -80,6 +84,9 @@ pub(super) fn classify_impl(
         kept.push(indent_rows(&trailing, &[]));
     }
 
+    if let (false, Some(top)) = (kept.is_empty(), &body_top) {
+        kept.insert(0, indent_rows(top, &[]));
+    }
     let partial = (!kept.is_empty()).then(|| format!("{header} {{\n{}\n}}", kept.join("\n\n")));
     let root_text = match (leading, partial) {
         (Some(comments), Some(partial)) => Some(format!("{comments}\n{partial}")),
@@ -91,19 +98,36 @@ pub(super) fn classify_impl(
     Ok(())
 }
 
-/// The outer attributes of an item as written, one per row, each row ending in a newline.
-fn outer_attrs(lines: &[&str], attrs: &[syn::Attribute]) -> Result<String> {
-    let mut text = String::new();
-    for attr in attrs
+/// The outer attributes of an impl as written, with the comments between them and before the
+/// `impl` keyword, less the impl's indent, ending in a newline; empty when it has none.
+fn outer_attrs(lines: &[&str], item_impl: &syn::ItemImpl) -> Result<String> {
+    let Some(first) = item_impl
+        .attrs
         .iter()
-        .filter(|attr| matches!(attr.style, syn::AttrStyle::Outer))
-    {
-        let start = attr.pound_token.span.start();
-        let end = attr.bracket_token.span.close().end();
-        text.push_str(&source_between(lines, start, end)?);
-        text.push('\n');
-    }
-    Ok(text)
+        .find(|attr| matches!(attr.style, syn::AttrStyle::Outer))
+    else {
+        return Ok(String::new());
+    };
+    let start = first.pound_token.span.start();
+    let end = item_impl
+        .defaultness
+        .map(|token| token.span)
+        .or(item_impl.unsafety.map(|token| token.span))
+        .unwrap_or(item_impl.impl_token.span)
+        .start();
+    let text = source_between(lines, start, end)?;
+    let rows: Vec<&str> = text
+        .split('\n')
+        .enumerate()
+        .map(|(row, line)| {
+            if row == 0 {
+                line
+            } else {
+                &line[leading_blanks(line).min(start.column)..]
+            }
+        })
+        .collect();
+    Ok(format!("{}\n", rows.join("\n").trim_end()))
 }
 
 /// Build the impl header string (e.g., `impl<T: Clone> Foo<T>` or `impl Trait for Foo`).

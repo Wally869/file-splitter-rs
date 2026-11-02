@@ -63,12 +63,19 @@ pub(super) fn try_classify_inline_module(
     )?;
     let declaration = format!("{};", head.trim_end());
 
-    // Classify items inside the module
     let mut mod_use_statements = Vec::new();
     let mut mod_splittable = Vec::new();
     let mut mod_items = Vec::new();
 
+    let mut prev_end = inner_attrs_end(&item_mod.attrs, open.line);
+    let first_member = items
+        .first()
+        .and_then(|item| first_token_start(&item.to_token_stream()));
+    let body_top = body_top(lines, brace, prev_end, first_member)?;
     for item in items {
+        let (start, end) = token_lines(&item.to_token_stream()).context("item has no tokens")?;
+        let from = Some(leading_start(lines, prev_end, start));
+        prev_end = end;
         match item {
             Item::Fn(item_fn) => {
                 let parts = FnParts {
@@ -76,29 +83,50 @@ pub(super) fn try_classify_inline_module(
                     defaultness: None,
                     sig: &item_fn.sig,
                 };
-                let source = dedented_source(lines, item, None)?;
+                let source = dedented_source(lines, item, from)?;
                 mod_splittable.push(moved_fn(source, parts, None)?);
             }
             Item::Impl(item_impl) => {
-                classify_impl(item_impl, lines, None, &mut mod_splittable, &mut mod_items)?;
+                classify_impl(item_impl, lines, from, &mut mod_splittable, &mut mod_items)?;
             }
             Item::Use(_) => {
-                mod_use_statements.push(dedented_source(lines, item, None)?.text);
+                mod_use_statements.push(dedented_source(lines, item, from)?.text);
             }
             _ => {
-                let text = dedented_source(lines, item, None)?.text;
+                let text = dedented_source(lines, item, from)?.text;
                 mod_items.push(ModItem { source_text: text });
             }
         }
     }
+    let close_line = brace.span.close().start().line;
+    let epilogue = comment_rows(lines, prev_end + 1, close_line - 1)?;
 
     Ok(Some(InlineModule {
         name,
         declaration,
+        body_top,
         use_statements: mod_use_statements,
         splittable_items: mod_splittable,
         mod_items,
+        epilogue,
     }))
+}
+
+/// The last line of the inner attributes in `attrs`, or `brace_line` when that is later.
+pub(super) fn inner_attrs_end(attrs: &[syn::Attribute], brace_line: usize) -> usize {
+    attrs
+        .iter()
+        .filter(|attr| matches!(attr.style, syn::AttrStyle::Inner(_)))
+        .map(|attr| attr.bracket_token.span.close().end().line)
+        .fold(brace_line, usize::max)
+}
+
+pub(super) fn first_token_start(tokens: &TokenStream) -> Option<LineColumn> {
+    tokens
+        .clone()
+        .into_iter()
+        .next()
+        .map(|tree| tree.span().start())
 }
 
 /// First and last source line (1-indexed, inclusive) of a token stream; doc comments and
