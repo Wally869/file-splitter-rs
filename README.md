@@ -1,22 +1,26 @@
 # file_splitter_rs
 
-A CLI tool that splits large Rust source files into submodules with semantically clustered subfiles. Designed for AI-assisted codebases where agents struggle with oversized files.
+`file_splitter_rs` splits a large Rust source file into a module: a root `mod.rs` and a few part files, each holding a group of related functions.
 
-## Problem
+Coding agents work badly on very long files. They lose track of the content and fall back on fragile `sed` edits. This tool does the mechanical part of a split, so the agent only has to name the new files.
 
-When `.rs` files grow too large, AI coding agents lose context and resort to fragile `sed`-based edits. This tool automates splitting those files into well-organized submodules while keeping imports stable.
-
-## Installation
+## Install
 
 ```sh
 cargo install --path .
 ```
 
-## Usage
+## Commands
 
-### Scan for oversized files
+```
+file_splitter_rs scan <path> [--threshold <N>]     # default threshold: 300
+file_splitter_rs report <file>
+file_splitter_rs split <file> [--budget <N>]       # default budget: 150
+```
 
-Find all `.rs` files in a directory that exceed a line threshold:
+### scan
+
+Lists the `.rs` files under a directory that are longer than the threshold, longest first.
 
 ```sh
 file_splitter_rs scan src/ --threshold 300
@@ -30,9 +34,9 @@ Lines    File
 311      src/utils.rs
 ```
 
-### Report functions in a file
+### report
 
-List every function and method with its line span and parent impl:
+Lists each function and method in a file, with its `impl` type and its line span.
 
 ```sh
 file_splitter_rs report src/server.rs
@@ -47,55 +51,34 @@ handle_response                          Server                         43      
 validate_port                            -                              140      142      3
 ```
 
-### Split a file into a submodule
+### split
 
-Split a large file into clustered subfiles:
+Turns one file into a module. The budget is the target size of a part, in lines.
 
 ```sh
 file_splitter_rs split src/server.rs --budget 150
 ```
 
-This transforms:
+`src/server.rs` is replaced by:
 
 ```
-src/server.rs           → deleted
+src/server/mod.rs       types, traits, constants, imports, re-exports
+src/server/part_0.rs    for example the handle_* methods
+src/server/part_1.rs    for example the parse_* methods
 ```
 
-Into:
+## How a split works
 
-```
-src/server/mod.rs       → struct/enum/trait definitions + re-exports
-src/server/part_0.rs    → handle_* methods
-src/server/part_1.rs    → parse_* methods
-src/server/part_2.rs    → validate_* functions
-...
-```
+1. **Parse.** `syn` reads the file and lists its top-level items.
+2. **Sort.** Type definitions, traits, constants and `use` lines stay in `mod.rs`. Free functions and `impl` methods can move.
+3. **Group.** Function names are cut at each `_` and compared with BM25. Agglomerative clustering then groups the closest names, so `parse_header`, `parse_body` and `parse_query` end up in the same part.
+4. **Write.** Each group becomes a `part_N.rs` file. Methods stay inside an `impl Type { }` block of their type. `mod.rs` re-exports each part with `pub use part_N::*`.
 
-## How splitting works
+Because of these re-exports, paths such as `use crate::server::Server` keep working in the rest of the crate.
 
-1. **Parse** — The file is parsed with `syn` to extract all top-level items
-2. **Classify** — Structs, enums, traits, consts, and use statements stay in `mod.rs`. Functions and impl methods get split out
-3. **Cluster** — Function names are tokenized (split on `_`) and grouped using BM25 similarity scoring with agglomerative clustering. Functions with similar name prefixes (e.g. `parse_header`, `parse_body`, `parse_query`) naturally cluster together
-4. **Emit** — Each cluster becomes a `part_N.rs` file. Methods are wrapped in their original `impl Type { }` blocks. `mod.rs` re-exports everything via `pub use part_N::*`
+## Use by an agent
 
-### What stays stable
-
-Downstream imports don't break. If other files use `use crate::server::SomeStruct`, that path still works because `mod.rs` re-exports all public items.
-
-## Intended workflow
-
-```
-1. agent runs:  file_splitter_rs scan src/ --threshold 300
-2. agent runs:  file_splitter_rs split src/big_file.rs --budget 150
-3. agent runs:  file_splitter_rs report src/big_file/part_0.rs
-4. agent renames part_0.rs → handlers.rs based on contents
-5. agent updates mod.rs declarations to match new filenames
-```
-
-## CLI Reference
-
-```
-file_splitter_rs scan <path> [--threshold <N>]     # default threshold: 300
-file_splitter_rs report <file>
-file_splitter_rs split <file> [--budget <N>]        # default budget: 150
-```
+1. `file_splitter_rs scan src/ --threshold 300` to find the long files.
+2. `file_splitter_rs split src/big_file.rs --budget 150` to split one.
+3. `file_splitter_rs report src/big_file/part_0.rs` to see what a part holds.
+4. Rename each part after its content, for example `part_0.rs` to `handlers.rs`, and change its `mod` line in `mod.rs` to match.
