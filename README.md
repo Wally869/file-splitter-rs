@@ -2,7 +2,7 @@
 
 Split a long Rust file into a module of smaller files.
 
-Coding agents handle long files badly: they lose track of the content and fall back on fragile `sed` edits. Asking a strong model to do the split itself wastes tokens on mechanical work. This tool does that work in one command, and the output compiles. What is left is to give the parts good names, and a cheap agent such as Haiku can do that.
+The tool does the mechanical split; the output compiles. Send a cheap agent (e.g. Haiku) to rename the parts after.
 
 ## Usage
 
