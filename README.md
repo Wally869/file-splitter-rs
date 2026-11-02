@@ -62,19 +62,21 @@ file_splitter_rs split src/server.rs --budget 150
 `src/server.rs` is replaced by:
 
 ```
-src/server/mod.rs       types, traits, constants, imports, re-exports
+src/server/mod.rs       types, traits, constants, imports, pub functions, re-exports
 src/server/part_0.rs    for example the handle_* methods
 src/server/part_1.rs    for example the parse_* methods
 ```
 
+When the input is already a `mod.rs`, it stays the root and the parts go beside it in the same folder. `split` prints the output folder and each file it wrote, with its line count. It does not overwrite an existing file.
+
 ## How a split works
 
 1. **Parse.** `syn` reads the file and lists its top-level items.
-2. **Sort.** Type definitions, traits, constants and `use` lines stay in `mod.rs`. Free functions and `impl` methods can move.
-3. **Group.** Function names are cut at each `_` and compared with BM25. Agglomerative clustering then groups the closest names, so `parse_header`, `parse_body` and `parse_query` end up in the same part.
-4. **Write.** Each group becomes a `part_N.rs` file. Methods stay inside an `impl Type { }` block of their type. `mod.rs` re-exports each part with `pub use part_N::*`.
+2. **Sort.** Type definitions, traits, constants, `use` lines and the file's `pub` free functions stay in `mod.rs`. Private free functions and `impl` methods can move.
+3. **Group.** Function names are cut at each `_` and compared with BM25. Agglomerative clustering then groups the closest names, so `parse_header`, `parse_body` and `parse_query` end up in the same part. Small groups merge until the part count is the moved lines divided by the budget, rounded up.
+4. **Write.** Each group becomes a `part_N.rs` file that starts with `use super::*;`. Methods stay inside an `impl Type { }` block of their type. A private item that moves gets `pub(super)`, so the root and the other parts can still call it. `mod.rs` imports or re-exports the moved functions.
 
-Because of these re-exports, paths such as `use crate::server::Server` keep working in the rest of the crate.
+The output compiles as written, and paths such as `use crate::server::Server` keep working in the rest of the crate.
 
 ## Use by an agent
 
