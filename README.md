@@ -1,8 +1,46 @@
 # file_splitter_rs
 
-`file_splitter_rs` splits a large Rust source file into a module: a root `mod.rs` and a few part files, each holding a group of related functions.
+Split a long Rust file into a module of smaller files.
 
-Coding agents work badly on very long files. They lose track of the content and fall back on fragile `sed` edits. This tool does the mechanical part of a split, so the agent only has to name the new files.
+## Usage
+
+```sh
+file_splitter_rs scan <dir> [--threshold 300]   # list .rs files longer than the threshold
+file_splitter_rs report <file>                  # list the functions and methods of a file
+file_splitter_rs split <file> [--budget 150]    # split the file into parts of about <budget> lines
+```
+
+Typical run:
+
+```sh
+$ file_splitter_rs scan src/ --threshold 300
+Lines    File
+-----    ----
+842      src/server.rs
+523      src/parser.rs
+
+$ file_splitter_rs split src/server.rs --budget 150
+```
+
+`src/server.rs` becomes a folder:
+
+```
+src/server/mod.rs      types, traits, constants, imports, pub functions
+src/server/part_0.rs   e.g. the handle_* methods
+src/server/part_1.rs   e.g. the parse_* methods
+```
+
+`split` prints the folder and each file it wrote. Rename the parts after what they hold (`part_0.rs` to `handlers.rs`) and change the matching `mod` line in `mod.rs`. `report` on a part shows what it holds:
+
+```sh
+$ file_splitter_rs report src/server/part_0.rs
+Function             Impl       Start    End      Lines
+--------             ----       -----    ---      -----
+handle_request       Server     32       40       9
+handle_response      Server     43       50       8
+```
+
+If the input is already a `mod.rs`, it stays the root and the parts go next to it. `split` never overwrites an existing file.
 
 ## Install
 
@@ -10,77 +48,19 @@ Coding agents work badly on very long files. They lose track of the content and 
 cargo install --path .
 ```
 
-## Commands
+## What the output looks like
 
-```
-file_splitter_rs scan <path> [--threshold <N>]     # default threshold: 300
-file_splitter_rs report <file>
-file_splitter_rs split <file> [--budget <N>]       # default budget: 150
-```
+- `mod.rs` keeps the types, traits, constants, `use` lines and the `pub` free functions, so the module's API stays where it was.
+- Each part starts with `use super::*;`. Methods sit in an `impl Type { }` block for their type.
+- A private function that moves to a part becomes `pub(super)`, so the root and the other parts can still call it.
+- Paths from the rest of the crate, such as `crate::server::Server`, do not change.
 
-### scan
+The output compiles without edits.
 
-Lists the `.rs` files under a directory that are longer than the threshold, longest first.
+## How functions are grouped
 
-```sh
-file_splitter_rs scan src/ --threshold 300
-```
+Function names are cut at each `_` and compared with BM25, then clustered: `parse_header`, `parse_body` and `parse_query` end up together. Small clusters merge until the number of parts is the moved lines divided by the budget, rounded up.
 
-```
-Lines    File
------    ----
-842      src/server.rs
-523      src/parser.rs
-311      src/utils.rs
-```
+## Why
 
-### report
-
-Lists each function and method in a file, with its `impl` type and its line span.
-
-```sh
-file_splitter_rs report src/server.rs
-```
-
-```
-Function                                 Impl                           Start    End      Lines
---------                                 ----                           -----    ---      -----
-new                                      Server                         24       29       6
-handle_request                           Server                         32       40       9
-handle_response                          Server                         43       50       8
-validate_port                            -                              140      142      3
-```
-
-### split
-
-Turns one file into a module. The budget is the target size of a part, in lines.
-
-```sh
-file_splitter_rs split src/server.rs --budget 150
-```
-
-`src/server.rs` is replaced by:
-
-```
-src/server/mod.rs       types, traits, constants, imports, pub functions, re-exports
-src/server/part_0.rs    for example the handle_* methods
-src/server/part_1.rs    for example the parse_* methods
-```
-
-When the input is already a `mod.rs`, it stays the root and the parts go beside it in the same folder. `split` prints the output folder and each file it wrote, with its line count. It does not overwrite an existing file.
-
-## How a split works
-
-1. **Parse.** `syn` reads the file and lists its top-level items.
-2. **Sort.** Type definitions, traits, constants, `use` lines and the file's `pub` free functions stay in `mod.rs`. Private free functions and `impl` methods can move.
-3. **Group.** Function names are cut at each `_` and compared with BM25. Agglomerative clustering then groups the closest names, so `parse_header`, `parse_body` and `parse_query` end up in the same part. Small groups merge until the part count is the moved lines divided by the budget, rounded up.
-4. **Write.** Each group becomes a `part_N.rs` file that starts with `use super::*;`. Methods stay inside an `impl Type { }` block of their type. A private item that moves gets `pub(super)`, so the root and the other parts can still call it. `mod.rs` imports or re-exports the moved functions.
-
-The output compiles as written, and paths such as `use crate::server::Server` keep working in the rest of the crate.
-
-## Use by an agent
-
-1. `file_splitter_rs scan src/ --threshold 300` to find the long files.
-2. `file_splitter_rs split src/big_file.rs --budget 150` to split one.
-3. `file_splitter_rs report src/big_file/part_0.rs` to see what a part holds.
-4. Rename each part after its content, for example `part_0.rs` to `handlers.rs`, and change its `mod` line in `mod.rs` to match.
+Coding agents handle long files badly: they lose track of the content and fall back on fragile `sed` edits. This tool does the mechanical work of a split, so the agent only picks names for the parts.
