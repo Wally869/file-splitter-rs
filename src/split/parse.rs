@@ -1,10 +1,11 @@
 use std::ops::Range;
 
 use anyhow::{Context, Result};
-use proc_macro2::LineColumn;
+use proc_macro2::{LineColumn, TokenStream, TokenTree};
+use quote::ToTokens;
 use syn::{ImplItem, Item, Visibility};
 
-/// A single splittable item (function or method) with its source text.
+/// A single splittable item (function, method or whole trait impl) with its source text.
 #[derive(Debug, Clone)]
 pub struct SplittableItem {
     /// Function/method name
@@ -15,12 +16,17 @@ pub struct SplittableItem {
     pub line_count: usize,
     /// If this is a method, the impl block context needed to wrap it
     pub impl_context: Option<ImplContext>,
+    /// A whole `impl Trait for Type` block: a trait impl cut in pieces does not compile
+    pub trait_impl: bool,
     /// Declared `pub` (not restricted)
     pub public: bool,
     /// The visibility as written in the source module, empty when private
     pub root_vis: String,
     /// The edit that keeps a private item reachable once it moves into a part
     pub vis_fix: Option<VisFix>,
+    /// Rows of `source_text` that start inside a literal, where an indent change would
+    /// change the literal
+    pub literal_rows: Vec<usize>,
 }
 
 /// Replaces `range` of `source_text` with `replacement` when the item is emitted in a part.
@@ -83,8 +89,7 @@ pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> 
     let first_item_line = file
         .items
         .iter()
-        .map(|item| item_span(item).0)
-        .filter(|&line| line > 0)
+        .filter_map(|item| token_lines(&item.to_token_stream()).map(|(start, _)| start))
         .min()
         .unwrap_or(lines.len() + 1);
     let preamble = lines[..first_item_line - 1].join("\n");
@@ -92,14 +97,12 @@ pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> 
     for item in &file.items {
         match item {
             Item::Fn(item_fn) => {
-                let text = extract_item_source(&lines, item);
-                let first_line = item_span(item).0;
                 let parts = FnParts {
                     vis: &item_fn.vis,
                     defaultness: None,
                     sig: &item_fn.sig,
                 };
-                splittable_items.push(moved_fn(text, first_line, 0, parts, None, false)?);
+                splittable_items.push(moved_fn(dedented_source(&lines, item)?, parts, None)?);
             }
             Item::Impl(item_impl) => {
                 classify_impl(item_impl, &lines, &mut splittable_items, &mut mod_items)?;
@@ -109,13 +112,13 @@ pub fn classify_items(file: &syn::File, source: &str) -> Result<ClassifiedFile> 
                 if let Some(inline) = try_classify_inline_module(item_mod, &lines)? {
                     inline_modules.push(inline);
                 } else {
-                    let text = extract_item_source(&lines, item);
+                    let text = extract_source(&lines, item)?;
                     mod_items.push(ModItem { source_text: text });
                 }
             }
             // Everything else stays in mod.rs
             _ => {
-                let text = extract_item_source(&lines, item);
+                let text = extract_source(&lines, item)?;
                 mod_items.push(ModItem { source_text: text });
             }
         }
@@ -136,22 +139,13 @@ struct FnParts<'a> {
     sig: &'a syn::Signature,
 }
 
-/// Build a splittable item from its source `text`, whose first line is source line
-/// `first_line` and whose lines lost `indent` leading columns to a dedent.
+/// Build a splittable item from the dedented source of a fn.
 fn moved_fn(
-    text: String,
-    first_line: usize,
-    indent: usize,
+    source: Dedented,
     parts: FnParts,
     impl_context: Option<ImplContext>,
-    trait_impl: bool,
 ) -> Result<SplittableItem> {
-    // A trait impl method takes no visibility.
-    let vis_fix = if trait_impl {
-        None
-    } else {
-        visibility_fix(&text, first_line, indent, &parts)?
-    };
+    let vis_fix = visibility_fix(&source, &parts)?;
     let root_vis = match parts.vis {
         Visibility::Inherited => String::new(),
         Visibility::Restricted(r) if r.path.is_ident("self") => String::new(),
@@ -159,23 +153,20 @@ fn moved_fn(
     };
     Ok(SplittableItem {
         name: parts.sig.ident.to_string(),
-        line_count: text.lines().count(),
-        source_text: text,
+        line_count: source.text.lines().count(),
+        source_text: source.text,
         impl_context,
+        trait_impl: false,
         public: matches!(parts.vis, Visibility::Public(_)),
         root_vis,
         vis_fix,
+        literal_rows: source.literal_rows,
     })
 }
 
 /// A private item in a part must be `pub(super)` to stay reachable from the root and the
 /// other parts, which is the same reach it had as a private item of the root.
-fn visibility_fix(
-    text: &str,
-    first_line: usize,
-    indent: usize,
-    parts: &FnParts,
-) -> Result<Option<VisFix>> {
+fn visibility_fix(source: &Dedented, parts: &FnParts) -> Result<Option<VisFix>> {
     let sig = parts.sig;
     let (start, end, replacement) = match parts.vis {
         Visibility::Inherited => {
@@ -197,22 +188,25 @@ fn visibility_fix(
         ),
         _ => return Ok(None),
     };
-    let range =
-        byte_offset(text, first_line, indent, start)?..byte_offset(text, first_line, indent, end)?;
+    let range = byte_offset(source, start)?..byte_offset(source, end)?;
     Ok(Some(VisFix { range, replacement }))
 }
 
-fn byte_offset(text: &str, first_line: usize, indent: usize, at: LineColumn) -> Result<usize> {
+fn byte_offset(source: &Dedented, at: LineColumn) -> Result<usize> {
     let row = at
         .line
-        .checked_sub(first_line)
-        .with_context(|| format!("line {} is before the item start {first_line}", at.line))?;
+        .checked_sub(source.first_line)
+        .with_context(|| format!("line {} is before the item start", at.line))?;
+    let stripped = *source
+        .stripped
+        .get(row)
+        .with_context(|| format!("line {} is past the end of the item", at.line))?;
     let column = at
         .column
-        .checked_sub(indent)
+        .checked_sub(stripped)
         .with_context(|| format!("column {} is inside the removed indent", at.column))?;
     let mut offset = 0;
-    for (index, line) in text.split('\n').enumerate() {
+    for (index, line) in source.text.split('\n').enumerate() {
         if index == row {
             let in_line = line
                 .char_indices()
@@ -227,7 +221,8 @@ fn byte_offset(text: &str, first_line: usize, indent: usize, at: LineColumn) -> 
     anyhow::bail!("line {} is past the end of the item", at.line)
 }
 
-/// Classify an impl block: extract methods as splittable, keep non-method items in mod.
+/// Classify an impl block. A trait impl moves whole; an inherent impl gives its methods as
+/// splittable items and keeps its other items in a partial impl in the root.
 fn classify_impl(
     item_impl: &syn::ItemImpl,
     lines: &[&str],
@@ -236,17 +231,28 @@ fn classify_impl(
 ) -> Result<()> {
     let self_ty = &item_impl.self_ty;
     let self_type = quote::quote!(#self_ty).to_string();
+
+    if let Some((_, path, _)) = &item_impl.trait_ {
+        let source = dedented_source(lines, item_impl)?;
+        splittable_items.push(SplittableItem {
+            name: format!("{} for {self_type}", quote::quote!(#path)),
+            line_count: source.text.lines().count(),
+            source_text: source.text,
+            impl_context: None,
+            trait_impl: true,
+            public: false,
+            root_vis: String::new(),
+            vis_fix: None,
+            literal_rows: source.literal_rows,
+        });
+        return Ok(());
+    }
+
     let header = build_impl_header(item_impl);
-    let trait_impl = item_impl.trait_.is_some();
-
-    let mut has_non_methods = false;
-    let mut methods = Vec::new();
-
+    let mut kept = Vec::new();
     for impl_item in &item_impl.items {
         match impl_item {
             ImplItem::Fn(method) => {
-                let text = extract_impl_item_source(lines, impl_item);
-                let first_line = attr_start_line(&method.attrs, method.sig.fn_token.span);
                 let parts = FnParts {
                     vis: &method.vis,
                     defaultness: method.defaultness.as_ref(),
@@ -256,29 +262,21 @@ fn classify_impl(
                     header: header.clone(),
                     self_type: self_type.clone(),
                 };
-                methods.push(moved_fn(
-                    text,
-                    first_line,
-                    0,
-                    parts,
-                    Some(context),
-                    trait_impl,
-                )?);
+                let source = dedented_source(lines, method)?;
+                splittable_items.push(moved_fn(source, parts, Some(context))?);
             }
-            _ => {
-                has_non_methods = true;
+            other => {
+                let source = dedented_source(lines, other)?;
+                kept.push(indent_rows(&source.text, &source.literal_rows));
             }
         }
     }
 
-    if has_non_methods {
-        let partial = build_partial_impl_source(item_impl, lines);
+    if !kept.is_empty() {
         mod_items.push(ModItem {
-            source_text: partial,
+            source_text: format!("{header} {{\n{}\n}}", kept.join("\n\n")),
         });
     }
-
-    splittable_items.extend(methods);
     Ok(())
 }
 
@@ -327,29 +325,22 @@ fn try_classify_inline_module(
     for item in items {
         match item {
             Item::Fn(item_fn) => {
-                let raw = extract_item_source(lines, item);
-                let indent = common_indent(&raw);
-                let text = dedent(&raw);
                 let parts = FnParts {
                     vis: &item_fn.vis,
                     defaultness: None,
                     sig: &item_fn.sig,
                 };
-                let first_line = item_span(item).0;
-                mod_splittable.push(moved_fn(text, first_line, indent, parts, None, false)?);
+                mod_splittable.push(moved_fn(dedented_source(lines, item)?, parts, None)?);
             }
             Item::Impl(item_impl) => {
                 classify_impl(item_impl, lines, &mut mod_splittable, &mut mod_items)?;
             }
             Item::Use(_) => {
-                let text = dedent(&extract_item_source(lines, item));
-                mod_use_statements.push(text);
+                mod_use_statements.push(dedented_source(lines, item)?.text);
             }
             _ => {
-                let text = dedent(&extract_item_source(lines, item));
-                if !text.is_empty() {
-                    mod_items.push(ModItem { source_text: text });
-                }
+                let text = dedented_source(lines, item)?.text;
+                mod_items.push(ModItem { source_text: text });
             }
         }
     }
@@ -363,83 +354,117 @@ fn try_classify_inline_module(
     }))
 }
 
-/// Extract the source text for a top-level item, including leading attributes/docs.
-fn extract_item_source(lines: &[&str], item: &Item) -> String {
-    let (start_line, end_line) = item_span(item);
-    if start_line == 0 || end_line == 0 || start_line > lines.len() {
-        return String::new();
-    }
-    let start_idx = start_line.saturating_sub(1);
-    let end_idx = end_line.min(lines.len());
-    lines[start_idx..end_idx].join("\n")
+/// First and last source line (1-indexed, inclusive) of a token stream; doc comments and
+/// attributes are tokens, so they are included.
+fn token_lines(tokens: &TokenStream) -> Option<(usize, usize)> {
+    let mut trees = tokens.clone().into_iter();
+    let first = trees.next()?;
+    let start = first.span().start().line;
+    let end = trees.last().unwrap_or(first).span().end().line;
+    Some((start, end))
 }
 
-/// Get (start_line, end_line) for a top-level item (1-indexed, inclusive).
-fn item_span(item: &Item) -> (usize, usize) {
-    match item {
-        Item::Fn(f) => (
-            attr_start_line(&f.attrs, f.sig.fn_token.span),
-            f.block.brace_token.span.close().end().line,
-        ),
-        Item::Struct(s) => (
-            attr_start_line(&s.attrs, s.struct_token.span),
-            s.semi_token
-                .map(|t| t.span.end().line)
-                .or(s.fields.span_close_line())
-                .unwrap_or(s.struct_token.span.end().line),
-        ),
-        Item::Enum(e) => (
-            attr_start_line(&e.attrs, e.enum_token.span),
-            e.brace_token.span.close().end().line,
-        ),
-        Item::Trait(t) => (
-            attr_start_line(&t.attrs, t.trait_token.span),
-            t.brace_token.span.close().end().line,
-        ),
-        Item::Impl(i) => (
-            attr_start_line(&i.attrs, i.impl_token.span),
-            i.brace_token.span.close().end().line,
-        ),
-        Item::Use(u) => (
-            attr_start_line(&u.attrs, u.use_token.span),
-            u.semi_token.span.end().line,
-        ),
-        Item::Const(c) => (
-            attr_start_line(&c.attrs, c.const_token.span),
-            c.semi_token.span.end().line,
-        ),
-        Item::Static(s) => (
-            attr_start_line(&s.attrs, s.static_token.span),
-            s.semi_token.span.end().line,
-        ),
-        Item::Type(t) => (
-            attr_start_line(&t.attrs, t.type_token.span),
-            t.semi_token.span.end().line,
-        ),
-        Item::Mod(m) => (
-            attr_start_line(&m.attrs, m.mod_token.span),
-            m.semi.map(|t| t.span.end().line).unwrap_or_else(|| {
-                m.content
-                    .as_ref()
-                    .map(|(brace, _)| brace.span.close().end().line)
-                    .unwrap_or(m.mod_token.span.end().line)
-            }),
-        ),
-        Item::Macro(m) => {
-            let kw_span = m
-                .mac
-                .path
-                .segments
-                .first()
-                .map_or_else(|| m.mac.bang_token.span, |seg| seg.ident.span());
-            let end = m
-                .semi_token
-                .map(|t| t.span.end().line)
-                .unwrap_or_else(|| m.mac.delimiter.span().close().end().line);
-            (attr_start_line(&m.attrs, kw_span), end)
+/// The source lines of a syntax node, as written.
+fn extract_source(lines: &[&str], node: &impl ToTokens) -> Result<String> {
+    let (start, end) = token_lines(&node.to_token_stream()).context("item has no tokens")?;
+    let rows = lines
+        .get(start - 1..end)
+        .with_context(|| format!("lines {start}-{end} are outside the source"))?;
+    Ok(rows.join("\n"))
+}
+
+/// The source of a syntax node with its common indent removed.
+struct Dedented {
+    text: String,
+    /// Source line of the first row
+    first_line: usize,
+    /// Leading bytes removed from each row
+    stripped: Vec<usize>,
+    literal_rows: Vec<usize>,
+}
+
+/// The source lines of a syntax node, less the indent common to its code rows. A row that
+/// starts inside a literal keeps its leading whitespace, which is literal content.
+fn dedented_source(lines: &[&str], node: &impl ToTokens) -> Result<Dedented> {
+    let tokens = node.to_token_stream();
+    let (first_line, last_line) = token_lines(&tokens).context("item has no tokens")?;
+    let rows = lines
+        .get(first_line - 1..last_line)
+        .with_context(|| format!("lines {first_line}-{last_line} are outside the source"))?;
+
+    let mut literal_rows = Vec::new();
+    collect_literal_rows(tokens, first_line, &mut literal_rows);
+    literal_rows.sort_unstable();
+    literal_rows.dedup();
+    let is_literal = |row: usize| literal_rows.binary_search(&row).is_ok();
+
+    let indent = rows
+        .iter()
+        .enumerate()
+        .filter(|&(row, line)| !is_literal(row) && !line.trim().is_empty())
+        .map(|(_, line)| leading_blanks(line))
+        .min()
+        .unwrap_or(0);
+    let stripped: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(row, line)| {
+            if is_literal(row) {
+                0
+            } else {
+                leading_blanks(line).min(indent)
+            }
+        })
+        .collect();
+    let text = rows
+        .iter()
+        .zip(&stripped)
+        .map(|(line, &n)| &line[n..])
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(Dedented {
+        text,
+        first_line,
+        stripped,
+        literal_rows,
+    })
+}
+
+fn collect_literal_rows(tokens: TokenStream, first_line: usize, rows: &mut Vec<usize>) {
+    for tree in tokens {
+        match tree {
+            TokenTree::Group(group) => collect_literal_rows(group.stream(), first_line, rows),
+            TokenTree::Literal(literal) => {
+                let span = literal.span();
+                rows.extend(
+                    (span.start().line + 1..=span.end().line).map(|line| line - first_line),
+                );
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
         }
-        _ => (0, 0),
     }
+}
+
+fn leading_blanks(line: &str) -> usize {
+    line.bytes()
+        .take_while(|b| matches!(b, b' ' | b'\t'))
+        .count()
+}
+
+/// Indent every row of `text` by four spaces, except blank rows and `literal_rows`.
+pub fn indent_rows(text: &str, literal_rows: &[usize]) -> String {
+    text.split('\n')
+        .enumerate()
+        .map(|(row, line)| {
+            if line.trim().is_empty() || literal_rows.contains(&row) {
+                line.to_string()
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Get the start line, considering attributes.
@@ -448,70 +473,6 @@ fn attr_start_line(attrs: &[syn::Attribute], fallback: proc_macro2::Span) -> usi
         attr.pound_token.span.start().line
     } else {
         fallback.start().line
-    }
-}
-
-/// Helper trait to get closing brace line from struct fields.
-trait SpanCloseLine {
-    fn span_close_line(&self) -> Option<usize>;
-}
-
-impl SpanCloseLine for syn::Fields {
-    fn span_close_line(&self) -> Option<usize> {
-        match self {
-            syn::Fields::Named(f) => Some(f.brace_token.span.close().end().line),
-            syn::Fields::Unnamed(f) => Some(f.paren_token.span.close().end().line),
-            syn::Fields::Unit => None,
-        }
-    }
-}
-
-fn common_indent(text: &str) -> usize {
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0)
-}
-
-/// Strip common leading whitespace from a block of text.
-fn dedent(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let min_indent = common_indent(text);
-
-    if min_indent == 0 {
-        return text.to_string();
-    }
-
-    lines
-        .iter()
-        .map(|l| {
-            if l.len() >= min_indent {
-                &l[min_indent..]
-            } else {
-                l.trim()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Extract source for an impl item (method, const, type within impl block).
-fn extract_impl_item_source(lines: &[&str], impl_item: &ImplItem) -> String {
-    match impl_item {
-        ImplItem::Fn(f) => {
-            let start = if let Some(attr) = f.attrs.first() {
-                attr.pound_token.span.start().line
-            } else {
-                f.sig.fn_token.span.start().line
-            };
-            let end = f.block.brace_token.span.close().end().line;
-
-            let start_idx = start.saturating_sub(1);
-            let end_idx = end.min(lines.len());
-            lines[start_idx..end_idx].join("\n")
-        }
-        _ => String::new(),
     }
 }
 
@@ -545,25 +506,4 @@ fn build_impl_header(item_impl: &syn::ItemImpl) -> String {
         .unwrap_or_default();
 
     format!("{unsafety}impl{generics} {trait_part}{self_ty_str}{where_clause}")
-}
-
-/// Build source for a partial impl block (non-method items only).
-fn build_partial_impl_source(item_impl: &syn::ItemImpl, lines: &[&str]) -> String {
-    let header = build_impl_header(item_impl);
-    let mut parts = vec![format!("{header} {{")];
-
-    for impl_item in &item_impl.items {
-        match impl_item {
-            ImplItem::Fn(_) => {} // skip methods, they get split
-            _ => {
-                let text = extract_impl_item_source(lines, impl_item);
-                if !text.is_empty() {
-                    parts.push(format!("    {text}"));
-                }
-            }
-        }
-    }
-
-    parts.push("}".to_string());
-    parts.join("\n")
 }

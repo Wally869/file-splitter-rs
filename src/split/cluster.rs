@@ -302,6 +302,7 @@ mod tests {
                 header: "impl Foo".to_string(),
                 self_type: "Foo".to_string(),
             }),
+            trait_impl: false,
             public,
             root_vis: if public {
                 "pub".to_string()
@@ -309,6 +310,7 @@ mod tests {
                 String::new()
             },
             vis_fix: None,
+            literal_rows: Vec::new(),
         }
     }
 
