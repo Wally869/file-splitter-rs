@@ -1,11 +1,18 @@
 # Issues
 
-## 2026-11-02: split of `cooking-frenzy/crates/dsl/src/reach/mod.rs` (682 lines, budget 150)
+## Open (found in round 1, 2026-11-02)
 
-Found by the `file-splitter` agent. The split needed hand fixes before it compiled (cooking-frenzy commit e11e817).
+1. **Trait impl methods are split across parts.** This gives several impls of the same trait for one type, which does not compile. When the impl has associated items, a partial impl also stays in the root and clashes. Expected: a trait impl moves as one block.
+2. **Items with no span are dropped.** `extern crate`, `union` and `extern {}` blocks disappear from the output, unless one is the first item of the file. Expected: they stay in the root.
+3. **Inline module methods are not dedented.** Their free functions are dedented, and that can change multi-line string literals. Expected: one dedent rule for both that never touches literal content.
+4. **`src/split/parse.rs` is 569 lines.** Low priority: it works, but it is above the project's 500-line limit for files.
 
-1. **A `mod.rs` source breaks the module.** The tool moved the root to `reach/mod/mod.rs`, wrote the parts in `reach/mod/` and deleted `reach/mod.rs`. Expected: the parts go beside `mod.rs` in `reach/`, and `mod.rs` stays the root.
-2. **Each part copies the whole `use` header.** Paths that are relative to the root (`use expand::At;`, `use sets::...;`) do not resolve in a submodule; they need `super::`. The copied header also leaves many unused imports. The agent replaced each part's header with `use super::*;`.
-3. **Methods called from another part stay private.** An inherent method that moves to one part and is called from another part does not get `pub(super)`, so the cross-part calls fail to compile.
-4. **`split` does not print the output directory.** With issue 1, the parts went to a directory the caller did not expect.
-5. **The cluster layout ignores the suggested cut.** For example, `reach` and `reach_sources` moved out of `mod.rs` into `entry.rs`, and 12 small parts were made where 2 were suggested.
+## Fixed in round 1 (merge of 76ed3bb, 2026-11-02)
+
+The `cooking-frenzy/crates/dsl/src/reach/mod.rs` split (682 lines, budget 150) now compiles with no hand fixes: 4 parts, `cargo check -p dsl` clean.
+
+- A `mod.rs` input stays the root; parts go beside it.
+- Parts start with `use super::*;`, not a copy of the root header.
+- Private items used across parts get `pub(super)`.
+- `split` prints the output folder and each file with its line count.
+- Part count is ceil(moved lines / budget); the file's `pub` free functions stay in the root.
