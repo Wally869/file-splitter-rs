@@ -1,10 +1,14 @@
 # Issues
 
-## Open (found in round 3, 2026-11-02)
+## Open (found in round 4, 2026-11-02)
 
-1. **Comments inside an inline module are dropped.** Comments between the items of a split inline module (e.g. `mod tests { ... }`), and after its last item, are not in the output. Top-level items and impl members keep theirs.
-2. **Inner attributes of an inherent impl or an inline module are dropped.** `impl Foo { #![allow(x)] ... }` and `mod tests { #![allow(x)] ... }` lose the `#![...]`.
-3. **Comments on an impl's header lines are dropped.** A comment after the `{` of `impl Foo { // note`, or between the outer attributes of an inherent impl, is not copied.
+1. **Comments inside an inherent impl's header are dropped.** The header is rebuilt from tokens, so a comment inside it (`impl<T> /* note */ Foo<T>`, or in a `where` clause) is not copied. The `default` keyword of a `default impl` is dropped the same way.
+
+## Fixed in round 4 (commit 1fee84f, 2026-11-02)
+
+- Comments between the items of a split inline module move with the item that follows; comments after its last item stay at the end of the module's `mod.rs`.
+- Inner attributes are kept: the `#![...]` of an inherent impl is on every block emitted for it; the `#![...]` of a split inline module opens its `mod.rs`.
+- Comments on an inherent impl's header lines are on every block emitted for it: a comment after the `{` (with the inner attributes, at the top of the body) and comments between the outer attributes.
 
 ## Fixed in round 3 (commit be46da4, 2026-11-02)
 
