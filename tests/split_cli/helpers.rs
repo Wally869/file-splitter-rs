@@ -32,12 +32,16 @@ pub fn compile_fixture() -> PathBuf {
 }
 
 /// Copies the fixture crate to a fresh scratch folder named after `case`, splits its
-/// `engine/mod.rs`, and returns the scratch folder (the crate copy) and the split's stdout.
+/// `src/engine/mod.rs`, its integration test root `tests/flow.rs` and the test module
+/// `tests/shared.rs` of `tests/suite.rs`, and returns the scratch folder (the crate copy)
+/// and the stdout of the engine split.
 pub fn split_fixture(case: &str) -> (TempDir, String) {
     let copy = scratch(case);
     copy_dir(&compile_fixture(), copy.path());
 
     let stdout = run_split(&copy.path().join("src").join("engine").join("mod.rs"));
+    run_split(&copy.path().join("tests").join("flow.rs"));
+    run_split(&copy.path().join("tests").join("shared.rs"));
     (copy, stdout)
 }
 

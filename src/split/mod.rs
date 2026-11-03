@@ -1,7 +1,9 @@
 mod cluster;
 mod emit;
+mod names;
 mod parse;
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,7 +18,22 @@ pub fn run(file: &Path, budget: usize) -> Result<()> {
     // 1. Parse and classify items
     let classified = parse::classify_items(&parsed, &source)?;
 
-    let (kept, moved) = cluster::split_root_items(&classified.splittable_items, budget);
+    // The root lines of the items that never move, each with its blank line.
+    let lines = |text: &str| text.lines().count() + 1;
+    let fixed_lines = lines(&classified.preamble)
+        + classified
+            .mod_items
+            .iter()
+            .map(|item| lines(&item.source_text))
+            .sum::<usize>()
+        + classified
+            .inline_modules
+            .iter()
+            .map(|inline| lines(&inline.declaration))
+            .sum::<usize>()
+        + classified.epilogue.as_deref().map_or(0, lines);
+    let (kept, moved) =
+        cluster::split_root_items(&classified.splittable_items, budget, fixed_lines);
 
     if moved.is_empty() && classified.inline_modules.is_empty() {
         println!("No functions/methods to split in {}", file.display());
@@ -34,18 +51,14 @@ pub fn run(file: &Path, budget: usize) -> Result<()> {
     let clusters = cluster::cluster_items(&moved, budget);
 
     println!("Created {} clusters", clusters.len());
-    for (i, c) in clusters.iter().enumerate() {
-        let names: Vec<&str> = c.items.iter().map(|item| item.name.as_str()).collect();
-        println!(
-            "  part_{i}: {} items, {} lines — {:?}",
-            c.items.len(),
-            c.total_lines,
-            names
-        );
-    }
 
     // 3. Emit files
-    let emitted = emit::emit(file, &classified, &kept, &clusters, budget)?;
+    let mut source_clashes = HashSet::new();
+    let tokens: proc_macro2::TokenStream = source
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to tokenize {}: {e}", file.display()))?;
+    names::module_clashes(tokens, &mut source_clashes);
+    let emitted = emit::emit(file, &classified, &kept, &clusters, budget, &source_clashes)?;
 
     println!(
         "\nSplit {} into {} subfiles",

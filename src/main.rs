@@ -34,8 +34,8 @@ enum Command {
     Split {
         /// Rust source file to split
         file: PathBuf,
-        /// Max lines per subfile (default: 150)
-        #[arg(short, long, default_value_t = 150)]
+        /// Max lines per subfile (default: 300)
+        #[arg(short, long, default_value_t = 300)]
         budget: usize,
     },
 }

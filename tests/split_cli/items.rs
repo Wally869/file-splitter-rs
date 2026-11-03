@@ -5,9 +5,17 @@ use crate::helpers::{
     compile_fixture, mixed_fixture, read_all, rust_files, split_fixture, split_mixed,
 };
 
+/// The item keys of a split output, without the `mod` lines of the parts the split added:
+/// every `mod` key that `input` does not have.
+fn output_keys(files: &[PathBuf], input: &[String]) -> Vec<String> {
+    item_keys(files)
+        .into_iter()
+        .filter(|key| !key.starts_with("mod ") || input.contains(key))
+        .collect()
+}
+
 /// Sorted keys of the items in `files`: kind and name, with the impl target for impl items
-/// and trait impls. `use` lines and `mod part_N` declarations are left out: the split adds
-/// them.
+/// and trait impls. `use` lines are left out: the split adds them.
 fn item_keys(files: &[PathBuf]) -> Vec<String> {
     let mut keys = Vec::new();
     for (file, text) in read_all(files) {
@@ -46,9 +54,6 @@ fn collect_keys(items: &[syn::Item], keys: &mut Vec<String>) {
                 format!("impl {target}")
             }
             Item::Mod(m) => {
-                if m.ident.to_string().starts_with("part_") {
-                    continue;
-                }
                 if let Some((_, inner)) = &m.content {
                     collect_keys(inner, keys);
                 }
@@ -75,10 +80,19 @@ fn collect_keys(items: &[syn::Item], keys: &mut Vec<String>) {
 fn output_keeps_every_item_of_the_compile_fixture() {
     let (copy, _) = split_fixture("items_compile");
     let input = item_keys(&[compile_fixture().join("src").join("engine").join("mod.rs")]);
-    let output = item_keys(&rust_files(
-        &copy.path().join("src").join("engine"),
-        &["child.rs"],
-    ));
+    let output = output_keys(
+        &rust_files(&copy.path().join("src").join("engine"), &["child.rs"]),
+        &input,
+    );
+    assert_eq!(input, output);
+
+    let tests = compile_fixture().join("tests");
+    let input = item_keys(&[
+        tests.join("flow.rs"),
+        tests.join("suite.rs"),
+        tests.join("shared.rs"),
+    ]);
+    let output = output_keys(&rust_files(&copy.path().join("tests"), &[]), &input);
     assert_eq!(input, output);
 }
 
@@ -86,7 +100,7 @@ fn output_keeps_every_item_of_the_compile_fixture() {
 fn output_keeps_every_item_of_the_mixed_fixture() {
     let (_scratch, out) = split_mixed("items_mixed");
     let input = item_keys(&[mixed_fixture()]);
-    let output = item_keys(&rust_files(&out, &[]));
+    let output = output_keys(&rust_files(&out, &[]), &input);
     assert_eq!(input, output);
 }
 

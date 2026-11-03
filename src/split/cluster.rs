@@ -8,18 +8,33 @@ pub struct Cluster {
     pub total_lines: usize,
 }
 
-/// Cluster splittable items using BM25 name similarity + agglomerative clustering.
+/// The lines an item takes in a part: its own and the blank line after it.
+fn cost(item: &SplittableItem) -> usize {
+    item.line_count + 1
+}
+
+/// The lines a part may give its items under `budget`: the budget less the
+/// `use super::*;` line and the blank line after it.
+fn capacity(budget: usize) -> usize {
+    budget.saturating_sub(2).max(1)
+}
+
+/// Cluster splittable items using BM25 name similarity + agglomerative clustering. `budget`
+/// is the maximum line count of a part file: a part goes over it only when one item alone
+/// is larger.
 pub fn cluster_items(items: &[SplittableItem], budget: usize) -> Vec<Cluster> {
     if items.is_empty() {
         return Vec::new();
     }
+    let lines_of = |members: &[usize]| members.iter().map(|&i| items[i].line_count).sum();
 
     // If everything fits in one file, just return a single cluster
-    let total: usize = items.iter().map(|i| i.line_count).sum();
+    let total: usize = items.iter().map(cost).sum();
+    let budget = capacity(budget);
     if total <= budget {
         return vec![Cluster {
             items: items.to_vec(),
-            total_lines: total,
+            total_lines: lines_of(&(0..items.len()).collect::<Vec<_>>()),
         }];
     }
 
@@ -35,39 +50,54 @@ pub fn cluster_items(items: &[SplittableItem], budget: usize) -> Vec<Cluster> {
 
     // Agglomerative clustering with budget constraint
     let groups = agglomerative_cluster(items, &similarity, budget);
-    let mut groups = merge_to_count(groups, &similarity, total.div_ceil(budget.max(1)), budget);
-    groups.sort_by_key(|group| group.members.iter().min().copied());
+    // The fewest parts with no part over the budget: start at total / budget, and add a
+    // part while a merge had to go over it.
+    let mut target = total.div_ceil(budget);
+    let mut merged = loop {
+        let merged = merge_to_count(groups.clone(), &similarity, target, budget);
+        let over = merged
+            .iter()
+            .any(|group| group.lines > budget && group.members.len() > 1);
+        if !over || target >= groups.len() {
+            break merged;
+        }
+        target += 1;
+    };
+    merged.sort_by_key(|group| group.members.iter().min().copied());
 
-    groups
+    merged
         .into_iter()
         .map(|mut group| {
             group.members.sort_unstable();
             Cluster {
                 items: group.members.iter().map(|&i| items[i].clone()).collect(),
-                total_lines: group.lines,
+                total_lines: lines_of(&group.members),
             }
         })
         .collect()
 }
 
 /// Split `items` into the ones the root keeps and the ones that move to parts: the root keeps
-/// the `pub` free functions, the module API, unless together they exceed `budget`.
+/// the `pub` free functions, the module API, unless with the `fixed_lines` of the root
+/// (the items that never move) they exceed `budget`.
 pub fn split_root_items(
     items: &[SplittableItem],
     budget: usize,
+    fixed_lines: usize,
 ) -> (Vec<SplittableItem>, Vec<SplittableItem>) {
     let (api, rest): (Vec<SplittableItem>, Vec<SplittableItem>) = items
         .iter()
         .cloned()
         .partition(|item| item.public && item.impl_context.is_none());
-    let api_lines: usize = api.iter().map(|item| item.line_count).sum();
-    if api_lines > budget {
+    let api_lines: usize = api.iter().map(cost).sum();
+    if fixed_lines + api_lines > budget {
         return (Vec::new(), items.to_vec());
     }
     (api, rest)
 }
 
-/// Item indices of one cluster under construction.
+/// Item indices of one cluster under construction, and their cost in lines.
+#[derive(Clone)]
 struct Group {
     members: Vec<usize>,
     lines: usize,
@@ -216,7 +246,7 @@ fn agglomerative_cluster(
         .map(|(index, item)| {
             Some(Group {
                 members: vec![index],
-                lines: item.line_count,
+                lines: cost(item),
             })
         })
         .collect();
@@ -334,11 +364,29 @@ mod tests {
             .map(|name| item(name, 30, false, true))
             .collect();
 
+        // Each item takes 31 lines with its blank line, and a part has 98 lines for items
+        // under a budget of 100. The names make 5 pairs (`parse_*`, `emit_*`, ...) of 62
+        // lines, and no 2 pairs fit in one part: 5 parts.
         let clusters = cluster_items(&items, 100);
 
-        assert_eq!(clusters.len(), 3);
+        assert_eq!(clusters.len(), 5);
         let moved: usize = clusters.iter().map(|c| c.total_lines).sum();
         assert_eq!(moved, 300);
+    }
+
+    #[test]
+    fn no_part_goes_over_the_budget() {
+        let names = ["alpha_one", "beta_two", "gamma_three", "delta_four"];
+        let items: Vec<SplittableItem> = names
+            .iter()
+            .map(|name| item(name, 50, false, false))
+            .collect();
+
+        // 204 lines give 3 parts, but two items in one part take 102 lines: 4 parts.
+        let clusters = cluster_items(&items, 100);
+
+        assert_eq!(clusters.len(), 4);
+        assert!(clusters.iter().all(|c| c.total_lines + c.items.len() + 2 <= 100));
     }
 
     #[test]
@@ -350,7 +398,7 @@ mod tests {
             item("new", 30, true, true),
         ];
 
-        let (kept, moved) = split_root_items(&items, 150);
+        let (kept, moved) = split_root_items(&items, 150, 0);
 
         let kept: Vec<&str> = kept.iter().map(|i| i.name.as_str()).collect();
         let moved: Vec<&str> = moved.iter().map(|i| i.name.as_str()).collect();
@@ -365,7 +413,7 @@ mod tests {
             item("walk", 80, true, false),
         ];
 
-        let (kept, moved) = split_root_items(&items, 150);
+        let (kept, moved) = split_root_items(&items, 150, 0);
 
         assert!(kept.is_empty());
         assert_eq!(moved.len(), 2);

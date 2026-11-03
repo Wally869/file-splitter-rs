@@ -1,4 +1,6 @@
 /target
+/tests/fixtures/split_crate/target
+/tests/fixtures/split_crate/Cargo.lock
 .claude/
 temp/
 install.bat

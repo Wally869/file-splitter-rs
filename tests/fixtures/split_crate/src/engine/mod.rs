@@ -109,6 +109,39 @@ impl Shape for Engine {
     }
 }
 
+/// Stands in for `quote::quote!`: its input is code for another module, not for this one.
+macro_rules! quote {
+    ($($code:tt)*) => {
+        stringify!($($code)*)
+    };
+}
+
+pub fn emitted() -> usize {
+    emit_call().len() + omega_total()
+}
+
+fn emit_call() -> &'static str {
+    let first = quote!(super::systems::serve(&hand));
+    let second = first.trim();
+    let third = second.trim_start();
+    third.trim_end()
+}
+
+/// Only `omega_total` uses it: the root must not re-export it.
+pub(crate) fn omega_count() -> usize {
+    let first = 1;
+    let second = first + 1;
+    let third = second + 1;
+    third
+}
+
+fn omega_total() -> usize {
+    let first = omega_count();
+    let second = first * 2;
+    let third = second + 1;
+    third - 1
+}
+
 fn gamma_helper() -> u32 {
     let a = 1;
     let b = 2;

@@ -26,14 +26,14 @@ fn comments_stay_next_to_their_items() {
 
     let (path, before) = line_before(
         &files,
-        "pub(in super::super) fn free_banner() -> &'static str {",
+        "pub(super) fn free_banner() -> &'static str {",
     );
     assert_eq!(before, "// comment: before free_banner");
     assert!(!path.ends_with("mod.rs"), "free_banner stayed in the root");
 
     let (path, before) = line_before(
         &files,
-        "    pub(in super::super) fn panel_raw(&self) -> &'static str {",
+        "    pub(super) fn panel_raw(&self) -> &'static str {",
     );
     assert_eq!(before, "    // comment: before panel_raw");
     assert!(!path.ends_with("mod.rs"), "panel_raw stayed in the root");

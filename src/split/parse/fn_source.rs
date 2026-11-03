@@ -25,7 +25,7 @@ pub(super) fn moved_fn(
     })
 }
 
-/// A private item in a part must be `pub(in super::super)` to stay reachable from the root and the
+/// A private item in a part must be `pub(super)` to stay reachable from the root and the
 /// other parts, which is the same reach it had as a private item of the root.
 pub(super) fn visibility_fix(source: &Dedented, parts: &FnParts) -> Result<Option<VisFix>> {
     let sig = parts.sig;
@@ -40,12 +40,12 @@ pub(super) fn visibility_fix(source: &Dedented, parts: &FnParts) -> Result<Optio
                 .or(sig.abi.as_ref().map(|abi| abi.extern_token.span))
                 .unwrap_or(sig.fn_token.span)
                 .start();
-            (at, at, "pub(in super::super) ")
+            (at, at, "pub(super) ")
         }
         Visibility::Restricted(r) if r.path.is_ident("self") => (
             r.pub_token.span.start(),
             r.paren_token.span.close().end(),
-            "pub(in super::super)",
+            "pub(super)",
         ),
         _ => return Ok(None),
     };

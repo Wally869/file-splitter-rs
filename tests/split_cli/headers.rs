@@ -127,7 +127,7 @@ fn inline_module_comments_and_inner_attributes_are_kept() {
     let parts = read_all(&rust_files(&tests_dir, &["mod.rs"]));
     for name in ["delta_runs", "epsilon_runs"] {
         let expected =
-            format!("// comment: before {name}\n#[test]\npub(in super::super) fn {name}()");
+            format!("// comment: before {name}\n#[test]\npub(super) fn {name}()");
         assert!(
             parts.iter().any(|(_, text)| text.contains(&expected)),
             "`{expected}` is not in a tests part"

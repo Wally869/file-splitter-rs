@@ -1,8 +1,20 @@
 # Issues
 
-## Open (found in round 6, 2026-11-02)
+## Open
 
-1. **`split` of an integration test root gives no test target.** `split tests/split_cli.rs` writes `tests/split_cli/mod.rs`; cargo builds `tests/<name>.rs` and `tests/<name>/main.rs` only, so the split tests no longer run. Its clusters also mixed helpers and tests in every part, so round 6 split the file by hand.
+1. **A function larger than the budget stays one file over the budget.** The tool moves code without changes, so it cannot split one function (cooking-frenzy `one_system`, 410 lines, gives a 413-line part).
+2. **The clusters of a test file can mix helpers and tests** (found in round 6). Not checked again.
+
+## Fixed on 2026-11-03 (cooking-frenzy round 73 findings, `FILE_SPLITTER_ISSUES.md` of that project)
+
+- `quote!`, `quote_spanned!`, `parse_quote!` and `parse_quote_spanned!` input keeps its `super::` paths. The rewrite had turned `quote!(super::systems::f(..))` in the dsl generator into `super::super::systems`, which broke the generated code of `sim` (14 errors E0433).
+- A private function that moves to a part gets `pub(super)` again. The round 2 self-split of `parse.rs`, made before the token-aware rewrite, had changed the tool's own literals to `pub(in super::super)`: one level too wide, and an error at a crate root.
+- Parts take a name from the words of their items (`alpha.rs`, `shape.rs`), never `part_N` unless no word is free.
+- `--budget` defaults to 300 and is a maximum per file: an item counts with its blank line, a part gives 2 lines to `use super::*;`, and a merge that would go over the budget makes one more part instead. The root moves its `pub` functions too when they do not fit with its fixed items.
+- No unused import: root imports use identifier tokens (not words in comments or `use std::path` segments); a restricted-visibility function is re-exported only when another file of the crate names it; a part gets `use super::*;` only when it needs it (`#[allow(unused_imports)]` when that cannot be known).
+- `tests/foo.rs`, `benches/foo.rs`, `examples/foo.rs` and `src/bin/foo.rs` targets become `<dir>/foo/main.rs`; `src/lib.rs` and `src/main.rs` stay the root. A file of `tests/` that a file beside it declares with `mod` stays a module (`<dir>/foo/mod.rs`).
+- Checked on the six cooking-frenzy files of round 73 (at `f7bdeb5`, in a scratch worktree): `cargo check --workspace --all-targets` clean (one warning in `app/src/bars.rs`, a file the split does not touch), `cargo test -p dsl -p kernel -p sim` all pass; the test count was not compared with the count before the split.
+- The `file-splitter` agent (`~/.claude/agents/file-splitter.md`) and its hooks are reworked: budget from the brief (default 300), no baseline test, no clippy, one command per call, `cargo check --workspace --all-targets` then `cargo test -p` of each changed crate, once; `git add` and `git commit` allowed, with no credit to Claude; Grep and Read of the files the split wrote; it reports tool defects instead of diagnosing them.
 
 ## Fixed in round 6 (commit 9567553, 2026-11-02)
 
